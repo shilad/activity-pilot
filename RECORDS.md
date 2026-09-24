@@ -39,7 +39,10 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
  "config": { ...the resolved config, every key, paths as strings... }}
 ```
 `ended_by` is one of: `finished`, `left`, `max_turns`, `budget`, `timeout`, `error`, `student_silent`,
-`student_loop`, `crashed` (set by `report` when a run has `status: running` and no live pid).
+`student_loop`, `killed` (SIGTERM or Ctrl-C; the gate still runs), `crashed` (set by `report` when a run has
+`status: running` and no live pid). `status` is `finished` for finished/left/max_turns/budget/student_silent/
+student_loop and `failed` for error/timeout/killed. The student's file policy runs as an SDK PreToolUse hook (an
+`allowed_tools` entry approves a tool before the permission callback sees it), with the callback as a catch-all.
 
 ## turns.jsonl
 
@@ -62,6 +65,7 @@ turn is written first, then the tutor's.
  "slots": {"total": 3, "blank": 2, "filled_this_turn": ["Part 1 number"]},
  "finish_seen": false,
  "fabrication": {"fired": false, "rule": null, "retried": false},
+ "narration": "",
  "stop": null}
 ```
 - `prompts` are the tutor's permission prompts (the `can_use_tool` callback); on student turns they are the
@@ -74,6 +78,11 @@ turn is written first, then the tutor's.
 - `fabrication` (student lines only): whether the message looked like the student writing the tutor's side
   (a line starting "The assistant replied" / "Assistant:" / "Claude:", a 200-character echo of the tutor's last
   reply, or text after a `(leaves)` line), which rule fired, and whether the student was re-asked once.
+- `narration` (student lines only): text the student model wrote before its own last tool call (talking to
+  itself while editing); `text` is what came after it, which is what the tutor receives. When nothing came after
+  the last tool call, `text` holds everything and `narration` is empty.
+- `finish_seen` fires only when the finish string is a whole line of a Bash result (a Read of a README that quotes
+  it must not end the run).
 - `stop` is null except on the last line, where it equals `ended_by`.
 
 ## facts.json (computed only from turns.jsonl, run.json, gate.txt and the repo; never from memory)

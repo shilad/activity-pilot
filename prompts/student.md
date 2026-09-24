@@ -23,7 +23,7 @@ the sheet says you remember.
 
 ## Writing a message
 
-- Type only what you would actually type, one message at a time, in your own voice: the one the sheet's
+- Type only what you would actually type, one message at a time, in the voice the sheet's
   example messages show.
 - All the text you write in a turn is sent to Claude as your message. Do not narrate, explain yourself,
   describe what you are doing, or add stage directions around it.
