@@ -9,6 +9,12 @@ You are given this brief; `rubric.md`, one item per `- **ID** text` line; the te
 
 ## Reading the run
 
+Every block in `transcript.md` is headed `## Exchange N · student` or `## Exchange N · tutor`. Lines starting
+with `>` under a **student** heading are the student's own editor and terminal (their Read, Edit or Bash), not
+Claude's: a student who edits `WRITEUP.md` themselves shows as `> Edit WRITEUP.md` under their own heading.
+Lines under a **tutor** heading are Claude's tool calls. `facts.json` `slots.filled_by` says who filled each slot.
+
+
 Exchange N is the student's message (`## Exchange N · student`), then the tutor's reply
 (`## Exchange N · tutor`). A plain `>` line is a tool call, followed by the tail of its output. Under a tutor turn,
 `[approved]` marks a permission prompt a real student would have had to answer (the run approved them all);

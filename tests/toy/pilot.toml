@@ -4,3 +4,4 @@ tutor_model = "claude-haiku-4-5"
 student_model = "claude-haiku-4-5"
 max_turns = 4
 max_usd = 1
+reader_model = "claude-haiku-4-5"
