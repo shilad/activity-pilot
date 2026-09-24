@@ -20,3 +20,7 @@ packages = ["pilot"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"prompts" = "pilot/prompts"
+"personas/FORMAT.md" = "pilot/personas/FORMAT.md"

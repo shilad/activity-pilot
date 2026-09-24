@@ -1,0 +1,4 @@
+exit 1
+Part 1: 42
+Part 2: blank (XXXX)
+Part 3: blank (XXXX)

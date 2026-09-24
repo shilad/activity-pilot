@@ -34,6 +34,7 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
  "env_stripped": ["CLAUDE_CODE_SESSION_ID", "..."],
  "started": "2026-09-24T14:12:03Z", "ended": null, "ended_by": null, "setup_seconds": 0.0,
  "session_ids": {"tutor": null, "student": null},
+ "upstream": {"url": "", "local": null},          (set when the config key upstream_url is non-empty: the URL the template's setup types is rewritten to a local bare clone)
  "error": null,
  "config": { ...the resolved config, every key, paths as strings... }}
 ```
@@ -60,6 +61,7 @@ turn is written first, then the tutor's.
  "files_changed": ["WRITEUP.md"], "commits": [{"sha": "abc1234", "subject": "Part 1 done"}], "head": "abc1234",
  "slots": {"total": 3, "blank": 2, "filled_this_turn": ["Part 1 number"]},
  "finish_seen": false,
+ "fabrication": {"fired": false, "rule": null, "retried": false},
  "stop": null}
 ```
 - `prompts` are the tutor's permission prompts (the `can_use_tool` callback); on student turns they are the
@@ -69,6 +71,9 @@ turn is written first, then the tutor's.
   (field names as delivered; the example shows the CLI's camelCase for model_usage).
 - `files_changed`, `commits`, `head`, `slots` describe the repo at the end of this actor's turn, relative to
   the end of the previous turn (so they are attributable to this actor). `TRANSCRIPT.md` is excluded.
+- `fabrication` (student lines only): whether the message looked like the student writing the tutor's side
+  (a line starting "The assistant replied" / "Assistant:" / "Claude:", a 200-character echo of the tutor's last
+  reply, or text after a `(leaves)` line), which rule fired, and whether the student was re-asked once.
 - `stop` is null except on the last line, where it equals `ended_by`.
 
 ## facts.json (computed only from turns.jsonl, run.json, gate.txt and the repo; never from memory)
@@ -89,6 +94,8 @@ gate: {"exit": 0|int|"timeout"|null, "tail": "last 10 lines"}, finish_exchange: 
 stalls: {"exchanges_without_progress": [5, 6], "longest": 2},   (no slot filled, no commit, no non-protected file changed by either actor)
 tutor_left_repo: [ {exchange, path} ], suspicion: [ {exchange, sentence} ], student_saw_rules: [ {exchange, command} ],
 student_bash: n, student_denied: n, empty_student_turns: n,
+persona_drift: {early_median_words, late_median_words, ratio}, student_words_median: n,   (the old validity gate excluded ratios outside [0.3, 1.8]; reported, not judged)
+student_wrote_tutor_side: {count, exchanges: [...]},
 models: {tutor: "...", student: "..."}, sdk_version, claude_version,
 note: "cost measured with a warm prompt cache; a real student pausing minutes between messages may pay more"
 ```

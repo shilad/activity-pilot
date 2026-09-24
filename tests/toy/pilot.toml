@@ -1,0 +1,6 @@
+# The toy assignment: a small template for checking the library end to end at low cost.
+template = "template"
+tutor_model = "claude-haiku-4-5"
+student_model = "claude-haiku-4-5"
+max_turns = 4
+max_usd = 1

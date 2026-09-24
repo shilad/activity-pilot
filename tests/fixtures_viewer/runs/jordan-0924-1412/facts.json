@@ -1,0 +1,50 @@
+{
+ "run_id": "jordan-0924-1412",
+ "persona": "jordan",
+ "student_name": "Jordan Lee",
+ "status": "finished",
+ "ended_by": "max_turns",
+ "exchanges": 2,
+ "minutes_wall": 3.4,
+ "minutes_tutor": 1.24,
+ "cost_usd": {
+  "tutor": 0.31,
+  "student": 0.009,
+  "reader": null,
+  "total_student_side": 0.31
+ },
+ "windows": 0.0155,
+ "prompts": {
+  "total": 2,
+  "by_tool": {
+   "Bash": 2
+  },
+  "denied": 0
+ },
+ "slots": {
+  "total": 3,
+  "blank_at_start": 3,
+  "blank_at_end": 2,
+  "filled_by": {
+   "tutor": [],
+   "student": [
+    "Part 1 number"
+   ]
+  }
+ },
+ "gate": {
+  "exit": 1,
+  "tail": "Part 1: 42\nPart 2: blank"
+ },
+ "finish_exchange": null,
+ "stalls": {
+  "exchanges_without_progress": [
+   1
+  ],
+  "longest": 1
+ },
+ "models": {
+  "tutor": "claude-haiku-4-5-20251001",
+  "student": "claude-haiku-4-5-20251001"
+ }
+}

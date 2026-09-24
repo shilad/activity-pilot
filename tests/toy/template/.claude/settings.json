@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python *)",
+      "Bash(git *)",
+      "Read",
+      "Edit"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/log-event.sh\" SessionStart"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/log-event.sh\" Stop"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-rm.sh\""}]}
+    ]
+  }
+}
