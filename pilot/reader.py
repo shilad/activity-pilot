@@ -1,7 +1,7 @@
 """One model call reads a finished run against the assignment's rubric and writes scorecard.md and scorecard.json."""
 from __future__ import annotations
 
-import json, os, re  # noqa: E401
+import hashlib, json, os, re  # noqa: E401
 from pathlib import Path
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
@@ -30,7 +30,9 @@ def rubric_items(text: str) -> list[str]:
 def materials(run_dir: Path, cfg, run: dict) -> tuple[str, list[str]]:
     """The user message: the rubric, the template's rules, the persona sheet, the facts and the transcript."""
     rubric = (cfg.runs_dir.parent / "rubric.md").read_text(encoding="utf-8")
-    persona = cfg.runs_dir.parent / "personas" / f"{run.get('persona', '')}.md"
+    persona = run_dir / "persona.md"  # the sheet as the run was given it; older runs fall back to the live sheet
+    if not persona.exists():
+        persona = cfg.runs_dir.parent / "personas" / f"{run.get('persona', '')}.md"
     parts = [("rubric.md", rubric), ("CLAUDE.md (the tutor's rules)", (Path(cfg.template) / "CLAUDE.md").read_text()),
              ("persona sheet", persona.read_text(encoding="utf-8") if persona.exists() else "(missing)"),
              ("facts.json", (run_dir / "facts.json").read_text() if (run_dir / "facts.json").exists() else "{}"),
@@ -84,6 +86,8 @@ async def read(run_dir: Path, cfg) -> Path:
             break
         prompt = text + "\n\n" + RETRY.format(missing=", ".join(parsed["missing"]))
     (run_dir / "scorecard.md").write_text(card, encoding="utf-8")
-    result = {"cost_usd": round(total, 4), "model": model, "valid": not parsed["missing"], **parsed}
+    rubric_sha = hashlib.sha256((cfg.runs_dir.parent / "rubric.md").read_bytes()).hexdigest()
+    result = {"cost_usd": round(total, 4), "model": model, "valid": not parsed["missing"], "rubric_sha256": rubric_sha,
+              **parsed}
     (run_dir / "scorecard.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
     return run_dir / "scorecard.md"

@@ -15,7 +15,8 @@ MINUTES_PER_EXCHANGE = (2, 4)  # minutes a real student spends reading and typin
 STUDENT_TAIL_LINES = 8  # tool output lines per tool call in the tutor's reply as the student sees it
 TRANSCRIPT_TAIL_LINES = 20  # tool output lines per tool call in transcript.md
 NOTE = "cost measured with a warm prompt cache; a real student pausing minutes between messages may pay more"
-SLOT = re.compile(r"^\*\*(.+?):\*\*(.*)$")  # a line that starts with a bold label ending in a colon
+LABEL = re.compile(r"^\*\*(.+?)\*\*(.*)$", re.S)  # a line that starts with a bold label; the rest is the inline value
+TRAIL = re.compile(r"^\s*(\(.*?\))?\s*(\*\*:\*\*|:)?\s*")  # after the bold: an optional (note), then a colon, bold or plain
 SUSPICION = re.compile(r"simulat|harness|being tested", re.I)
 RULE_FILES = re.compile(r"claude\.md|\.claude", re.I)
 ABS_PATH = re.compile(r"(?:^|(?<=[\s\"'=(]))(~?/[\w.~-][^\s\"'`\\,;|&<>()]*)")  # absolute or ~ paths; not URLs
@@ -30,13 +31,40 @@ COLUMNS = ["run id", "persona", "ended_by", "exchanges", "wall minutes", "tutor 
 
 
 def slots(text: str, marker: str, part_heading: str) -> list[dict]:
-    """Every line starting `**Label:**`, blank when its trimmed value is the marker or empty."""
+    """Every slot in a writeup: a line starting with a bold label. Four shapes are read: `**Label:** value`,
+    `**Question?** value`, `**Label** (note): value`, and a label whose answer sits on the lines below it (the
+    first paragraph before the next label or heading). A bold label wrapped onto the next line is joined first.
+    A slot is blank when its value is the marker or empty."""
+    raw, lines, skip = text.splitlines(), [], False
+    for i, line in enumerate(raw):
+        if skip:  # the continuation line was joined onto the label above; keep the line count
+            lines.append("")
+            skip = False
+        elif line.startswith("**") and "**" not in line[2:] and i + 1 < len(raw):
+            lines.append(line + " " + raw[i + 1].strip())
+            skip = True
+        else:
+            lines.append(line)
     part, out, heading = None, [], re.compile(part_heading)
-    for line in text.splitlines():
+    for idx, line in enumerate(lines):
         if m := heading.match(line):
             part = int(m.group(1))
-        elif m := SLOT.match(line.strip()):
-            out.append({"label": m.group(1).strip(), "part": part, "blank": m.group(2).strip() in (marker, "")})
+            continue
+        if not (m := LABEL.match(line.strip())):
+            continue
+        label, value = m.group(1).strip().rstrip(":").strip(), TRAIL.sub("", m.group(2), count=1).strip()
+        if not value:  # the answer sits below the label
+            below = []
+            for nxt in lines[idx + 1:]:
+                s = nxt.strip()
+                if s.startswith(("**", "#")) or heading.match(nxt):
+                    break
+                if s:
+                    below.append(s)
+                elif below:
+                    break
+            value = " ".join(below)
+        out.append({"label": label, "part": part, "blank": value in (marker, "")})
     return out
 
 
@@ -78,6 +106,8 @@ def render_turn(turn: dict, *, for_student: bool = False) -> str:
     tail = STUDENT_TAIL_LINES if for_student else TRANSCRIPT_TAIL_LINES
     out = [] if for_student else [f"## Exchange {turn.get('exchange')} · {turn.get('actor')}"]
     out.append((turn.get("text") or "").strip() or "(no text)")
+    if not for_student and (turn.get("narration") or "").strip():  # what the student wrote to itself while editing
+        out += ["> (to self) " + line for line in turn["narration"].strip().splitlines() if line.strip()]
     for tool in turn.get("tools") or []:
         arg = _arg(tool).strip().splitlines() or [""]
         more = " ..." if len(arg) > 1 or len(arg[0]) > 200 else ""

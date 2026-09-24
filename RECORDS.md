@@ -12,6 +12,7 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
 | file | written | by |
 |---|---|---|
 | `run.json` | at start (status `running`); rewritten once at the end | run.py |
+| `persona.md` | at start: the persona sheet exactly as this run was given it (`run.json` carries its sha256) | run.py |
 | `turns.jsonl` | one line appended after every actor turn, flushed and fsynced | run.py |
 | `transcript.md` | one block appended after every actor turn (rendered by `facts.render_turn`) | run.py |
 | `run.log` | stderr of both CLI processes, appended as it arrives | run.py |
@@ -81,8 +82,12 @@ turn is written first, then the tutor's.
 - `narration` (student lines only): text the student model wrote before its own last tool call (talking to
   itself while editing); `text` is what came after it, which is what the tutor receives. When nothing came after
   the last tool call, `text` holds everything and `narration` is empty.
-- `finish_seen` fires only when the finish string is a whole line of a Bash result (a Read of a README that quotes
-  it must not end the run).
+- `finish_seen` fires when the finish string is a whole line of a Bash result, or a whole line of the tutor's own
+  text (bold or heading marks stripped); a Read of a README that quotes it must not end the run.
+- Narration is split from the student's message only at a real tool call; a no-op command (`true`, `:`, `echo`,
+  `sleep`) does not split, so a message written before a "wait" command still reaches the tutor.
+- Slot shapes read by `facts.slots`: `**Label:** value`, `**Question?** value`, `**Label** (note): value`, a label
+  with its answer on the lines below, and a bold label wrapped onto the next line.
 - `stop` is null except on the last line, where it equals `ended_by`.
 
 ## facts.json (computed only from turns.jsonl, run.json, gate.txt and the repo; never from memory)

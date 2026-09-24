@@ -5,7 +5,7 @@ other session is asked anything, so a crash loses at most the turn in progress."
 from __future__ import annotations
 
 import asyncio, contextlib, json, os, re, shlex, shutil, signal, socket, subprocess  # noqa: E401
-import time, tomllib, warnings  # noqa: E401
+import hashlib, sys, time, tomllib, warnings  # noqa: E401
 from dataclasses import MISSING, asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +18,8 @@ from claude_agent_sdk import (AssistantMessage, CanUseToolShadowedWarning, Claud
 STUDENT_TAIL_LINES = 8  # tool output lines per tool call in the tutor's reply as the student sees it (fallback view)
 STUDENT_MAX_TURNS = 12  # the SDK's max_turns per student message; reaching it ends the run as student_loop
 LEAK_WORDS = ("sim", "pilot", "harness", "persona")  # never allowed in a path the tutor can see
+HOST_VARS = ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT")  # never inherited
+NOOP = re.compile(r"^\s*(?:true|:|echo(?:\s+[^|&;>]*)?|sleep(?:\s+\S+)?)\s*$")  # a command that does nothing: not a reason to split a message
 TUTOR_EXTRA_ENV = {"MPLBACKEND": "Agg"}  # plots are written to files, never opened in a window
 STUDENT_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write"]  # plus Bash when student_bash is true
 # Every other built-in tool in CLI 2.1.281's init message and the SDK docs, removed from the student's session.
@@ -131,8 +133,12 @@ def clean_env(cfg: Config) -> tuple[dict, list[str]]:
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         if os.environ.get(name):
             raise ConfigError(f"{name} is set; runs use subscription auth only. Unset it and run again.")
-    stripped = sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC_")) and k not in cfg.env_keep)
-    return {k: v for k, v in os.environ.items() if k not in stripped}, stripped
+    stripped = sorted(k for k in os.environ if (k.startswith(("CLAUDE", "ANTHROPIC_")) and k not in cfg.env_keep)
+                      or k in HOST_VARS)
+    env = {k: v for k, v in os.environ.items() if k not in stripped}
+    venv = str(Path(sys.prefix).resolve())  # the library's own virtual environment (uv run puts it first on PATH)
+    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if not p.startswith(venv))
+    return env, stripped
 
 
 def load_persona(cfg: Config, name: str) -> dict:
@@ -150,6 +156,7 @@ def load_persona(cfg: Config, name: str) -> dict:
     frame = next((f.read_text(encoding="utf-8").strip() for f in (d / "student.md" for d in PROMPT_DIRS)
                   if f.is_file()), STUDENT_FRAME)
     return {"key": name, "name": m[1], "email": m[2], "edits": edits, "sheet": "\n".join(rest).strip(),
+            "raw": "\n".join(lines).strip() + "\n",
             "first": re.sub(r"[^a-z0-9]", "", m[1].split()[0].lower()) or name,
             "prompt": frame + "\n\n" + "\n".join(lines).strip()}  # the whole sheet, header lines as written
 
@@ -357,7 +364,8 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
                     texts.append(b.text)
                     turn["text"] = "\n\n".join(texts)
                 elif isinstance(b, ToolUseBlock):
-                    if split and texts:
+                    noop = b.name == "Bash" and bool(NOOP.match(str((b.input or {}).get("command", ""))))
+                    if split and texts and not noop:  # text before a real tool call is narration, not the message
                         narr.extend(texts)
                         texts.clear()
                         turn["text"] = ""
@@ -531,6 +539,7 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
 async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limit: int) -> None:
     run_dir, repo = sb["run_dir"], sb["repo"]
     log = open(run_dir / "run.log", "a", encoding="utf-8", buffering=1)
+    (run_dir / "persona.md").write_text(persona["raw"], encoding="utf-8")  # the sheet as this run was given it
     run = {"run_id": sb["run_id"], "status": "running", "assignment_dir": str(cfg.assignment_dir),
            "persona": persona["key"], "student_name": persona["name"], "student_email": persona["email"],
            "template": {"path": str(cfg.template), "commit": sb["template_commit"]}, "workspace": str(sb["workspace"]),
@@ -541,6 +550,7 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
            "host": socket.gethostname(), "env_stripped": stripped, "started": _now(), "ended": None, "ended_by": None,
            "setup_seconds": sb["setup_seconds"], "session_ids": {"tutor": None, "student": None},
            "upstream": sb["upstream"], "error": None,
+           "persona_sha256": hashlib.sha256(persona["raw"].encode()).hexdigest(),
            "config": {k: str(v) if isinstance(v, Path) else list(v) if isinstance(v, tuple) else v
                       for k, v in asdict(cfg).items()}}
     _write_json(run_dir / "run.json", run)
@@ -570,6 +580,9 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             if rule:  # re-ask once and use the second reply whatever it is
                 status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, cfg.finish_string,
                                            split=True)
+        if not student and cfg.finish_string:  # the tutor may say the finish phrase in its text, as a whole line
+            turn["finish_seen"] = turn["finish_seen"] or any(
+                line.strip().strip("*_#`").strip() == cfg.finish_string for line in turn["text"].splitlines())
         prev, changes = snapshot(repo, prev, cfg)
         turn.update(changes)
         _cost(state["cost"], actor, turn)

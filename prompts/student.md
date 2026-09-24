@@ -31,6 +31,8 @@ the sheet says you remember.
 - Never write Claude's side. Never invent what Claude did or said, and never continue past Claude's reply as
   if you had seen the next one. Your message ends where you would press Enter.
 - A slash command such as `/help` goes at the start of the message, as you would type it at the prompt.
+- Your turn ends when you stop writing, and Claude answers only after that. There is nothing to wait for inside
+  a turn: never run a command just to wait, and never run a placeholder command.
 
 ## Time
 

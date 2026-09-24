@@ -127,6 +127,8 @@ def _turn(t: dict) -> str:
     out = [f"<p><strong>{escape(str(t.get('actor') or 'unknown').capitalize())}</strong> {escape(', '.join(head))}</p>"]
     text = str(t.get("text") or "")
     out.append(f'<div class="t">{escape(text)}</div>' if text.strip() else "<p>No text this turn.</p>")
+    if str(t.get("narration") or "").strip():
+        out.append(f'<p style="color:#666">(to self) {escape(str(t["narration"]))}</p>')
     tools = t.get("tools") or []
     if tools:
         calls = "".join(_tool(c) for c in tools if isinstance(c, dict))
