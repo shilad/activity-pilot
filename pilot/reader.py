@@ -48,7 +48,7 @@ def parse(text: str, ids: list[str]) -> dict:
                           "evidence": m.group(4).strip()})
             seen.add(m.group(1))
     fid = re.search(r"^Fidelity:\s*(hold|drifted|broke)", text, re.M | re.I)
-    lever = re.search(r"^ONE LEVER:\s*(.+)$", text, re.M)
+    lever = re.search(r"^ONE[ _]LEVER:\s*(.+)$", text, re.M | re.I)
     missing = [i for i in ids if i not in seen] + ([] if lever else ["the ONE LEVER line"]) + \
         ([] if fid else ["the Fidelity line"])
     return {"items": items, "fidelity": fid.group(1).lower() if fid else None,
