@@ -17,7 +17,7 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
 | `run.log` | stderr of both CLI processes, appended as it arrives | run.py |
 | `gate.txt` | end: first line `exit <code>` (or `exit timeout`), then the gate command's output | run.py |
 | `facts.json` | end, in a guarded block; regenerable by `pilot report` | facts.py |
-| `scorecard.md`, `scorecard.json` | `pilot read` | reader.py |
+| `scorecard.md`, `scorecard.json` | `pilot read`; `scorecard.json` is `{"cost_usd": float, "model": str, "fidelity": "hold|drifted|broke", "one_lever": str, "items": [{"id": str, "grade": "C|P|I|n/o", "turns": [int], "evidence": str}]}` | reader.py |
 | `sheet-<initials>.md` | `pilot calibrate` | facts.py |
 | `../viewer.html` (in `runs/`) | `pilot view` | viewer.py |
 
@@ -96,6 +96,8 @@ tutor_left_repo: [ {exchange, path} ], suspicion: [ {exchange, sentence} ], stud
 student_bash: n, student_denied: n, empty_student_turns: n,
 persona_drift: {early_median_words, late_median_words, ratio}, student_words_median: n,   (the old validity gate excluded ratios outside [0.3, 1.8]; reported, not judged)
 student_wrote_tutor_side: {count, exchanges: [...]},
+truncated_lines: n (turns.jsonl lines that did not parse); commits[].exchange is added; ended_by falls back to the last
+line's stop, then to "crashed" when run.json says running and the recorded pid is not alive,
 models: {tutor: "...", student: "..."}, sdk_version, claude_version,
 note: "cost measured with a warm prompt cache; a real student pausing minutes between messages may pay more"
 ```

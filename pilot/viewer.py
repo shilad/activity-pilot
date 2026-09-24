@@ -16,7 +16,7 @@ CSS = ("body{max-width:62rem;margin:0 auto;padding:0 1rem;font-family:sans-serif
        "table{border-collapse:collapse}th,td{padding:.2rem .5rem;text-align:left;vertical-align:top}"
        "tbody tr:nth-child(even){background:#eee}")
 COLUMNS = ("Run", "Persona", "Ended by", "Exchanges", "Gate exit", "Wall minutes", "Tutor USD", "Windows",
-           "Prompts", "Blank slots at end")
+           "Prompts", "Blank slots at end", "Drift", "Fabrications")
 
 
 def _text(path: Path) -> str | None:
@@ -95,7 +95,9 @@ def _load(run_dir: Path, assignment_dir: Path) -> dict:
                 _num(_first((f.get("cost_usd") or {}).get("tutor"), tutor_usd[-1] if tutor_usd else None), 2),
                 _num(f.get("windows"), 2),
                 (f.get("prompts") or {}).get("total"),
-                (f.get("slots") or {}).get("blank_at_end")]
+                (f.get("slots") or {}).get("blank_at_end"),
+                _num((f.get("persona_drift") or {}).get("ratio"), 2),
+                (f.get("student_wrote_tutor_side") or {}).get("count")]
     return r
 
 
@@ -138,6 +140,10 @@ def _turn(t: dict) -> str:
     for h in t.get("hooks") or []:
         detail = "" if h.get("ok") or not h.get("output") else f": {h['output']}"
         lines.append(f"[hook] {h.get('event')} {'ok' if h.get('ok') else 'failed'}{detail}")
+    fab = t.get("fabrication") or {}
+    if fab.get("fired"):
+        lines.append(f"[student wrote Claude's side, rule {fab.get('rule')}, "
+                     f"{'re-asked' if fab.get('retried') else 'not re-asked'}]")
     if t.get("stop"):
         lines.append(f"[run stopped] {t['stop']}")
     out += [f"<div><code>{escape(line)}</code></div>" for line in lines]
