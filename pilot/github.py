@@ -73,7 +73,8 @@ def add_repo(root: Path, owner: str, name: str, source: Path | None = None, *, p
     path = Path(root) / owner / f"{name}.git"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        args = ["clone", "-q", "--bare", "--no-local", str(source), str(path)] if source else ["init", "-q", "--bare", str(path)]
+        args = (["clone", "-q", "--bare", "--no-local", str(source), str(path)] if source else
+                ["init", "-q", "--bare", str(path)])
         p = subprocess.run(["git", *args], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if p.returncode:
             raise RuntimeError(f"git {' '.join(args[:2])} for {owner}/{name} failed: {p.stderr.strip()}")

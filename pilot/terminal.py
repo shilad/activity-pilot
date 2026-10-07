@@ -118,8 +118,8 @@ def picker_screen(sessions: list[dict], now: float | None = None) -> str:
         rows.append(f"{'❯' if i == 1 else ' '} {i}. {first}  ·  {age}  ·  {s['messages']} messages")
     if not rows:
         return "Resume a conversation\nNo conversations found in this folder.\n(Press Esc to go back.)"
-    return "\n".join(["Resume a conversation", *rows, "",
-                      "(Type the number of the conversation you pick. Enter takes the highlighted one; Esc goes back.)"])
+    return "\n".join(["Resume a conversation", *rows, "", "(Type the number of the conversation you pick. "
+                                                       "Enter takes the highlighted one; Esc goes back.)"])
 
 
 def parse_pick(text: str, sessions: list[dict]) -> str | None:

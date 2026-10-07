@@ -121,7 +121,8 @@ class Config:
 
 
 def _coerce(key, value, default):
-    kinds = {bool: bool, int: int, float: (int, float), tuple: (list, tuple), dict: dict}.get(type(default), (str, Path))
+    kinds = {bool: bool, int: int, float: (int, float), tuple: (list, tuple), dict: dict}.get(type(default),
+                                                                                             (str, Path))
     if not isinstance(value, kinds) or (isinstance(value, bool) and not isinstance(default, bool)):
         raise ConfigError(f"pilot.toml: {key} = {value!r} should be a {type(default).__name__}")
     return tuple(value) if isinstance(default, tuple) else float(value) if isinstance(default, float) else value
@@ -636,7 +637,8 @@ def _append(path: Path, text: str) -> None:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    (tmp := path.with_name(path.name + ".tmp")).write_text(redact(json.dumps(data, indent=1, ensure_ascii=False)) + "\n")
+    text = redact(json.dumps(data, indent=1, ensure_ascii=False)) + "\n"
+    (tmp := path.with_name(path.name + ".tmp")).write_text(text)
     os.replace(tmp, path)
 
 
