@@ -50,7 +50,8 @@ SILENT_PROMPT = "Type your next message to Claude."
 RETRY_PROMPT = "Send only your own next message to Claude, nothing else."
 LEAVES = "(leaves)"
 QUEUE_WAIT_S = 4  # after a reply ends, how long to wait for the CLI to answer a message typed during it
-BACKGROUND_WAIT_S = 1200  # how long a reply may wait for background work it started (graders, a long command)
+BACKGROUND_WAIT_S = 1200  # how long a reply may wait for background agents it started (graders)
+SHELL_QUIET_S = 30  # a background shell command (a server never ends) is waited for only until the CLI is this quiet
 DONE = ("completed", "failed", "killed", "stopped", "cancelled", "error")  # a background task's last states
 
 
@@ -586,18 +587,19 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
     the message it types to Claude: it goes to `narration`, and `text` is what came after the last tool call."""
     t0, pending, texts, narr, status = time.monotonic(), {}, [], [], ["ok", ""]
     turn["text"] = ""
-    tasks = client.__dict__.setdefault("_pilot_tasks", {})  # background tasks still running: id -> description
+    tasks = client.__dict__.setdefault("_pilot_tasks", {})  # background tasks still running: id -> (what, type)
+    left = client.__dict__.setdefault("_pilot_left_running", set())  # shell tasks no longer waited for (servers)
     match = finish if callable(finish) else (lambda line: bool(finish) and line.strip() == finish)
 
     def take(msg):
         if isinstance(msg, TaskStartedMessage):
-            tasks[msg.task_id] = msg.description
+            tasks[msg.task_id] = (msg.description, msg.task_type or "")
             turn.setdefault("background", {"started": [], "finished": [], "waited_s": 0})["started"].append(
                 msg.description[:200])
         elif isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)) and msg.status in DONE:
             if (what := tasks.pop(msg.task_id, None)) is not None:
                 turn.setdefault("background", {"started": [], "finished": [], "waited_s": 0})["finished"].append(
-                    f"{what[:200]}: {msg.status}")
+                    f"{what[0][:200]}: {msg.status}")
         elif isinstance(msg, HookEventMessage) and msg.subtype == "hook_response":
             out = str(msg.data.get("output") or msg.data.get("stderr") or msg.data.get("stdout") or "")
             turn["hooks"].append({"event": msg.hook_event_name, "output": out[:200],
@@ -655,7 +657,7 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
             if not isinstance(first, ResultMessage):
                 async for msg in gen:
                     take(msg)
-        if tasks:  # work the reply left running: Claude Code reports each task's end and may then carry on alone
+        if set(tasks) - left:  # work the reply left running: Claude Code reports each end and may then carry on
             await settle()
 
     async def settle():
@@ -664,11 +666,14 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
         reply."""
         start = time.monotonic()
         while time.monotonic() - start < BACKGROUND_WAIT_S:
+            agents = [t for t in tasks.values() if t[1] != "local_bash"]  # a shell task may be a server: never ends
             gen = client.receive_messages()
             try:
-                msg = await asyncio.wait_for(gen.__anext__(), QUEUE_WAIT_S if not tasks else 60)
+                msg = await asyncio.wait_for(gen.__anext__(), 60 if agents else SHELL_QUIET_S if tasks else
+                                             QUEUE_WAIT_S)
             except asyncio.TimeoutError:
-                if not tasks:
+                if not agents:
+                    left.update(tasks)  # only shell tasks remain, and the CLI is quiet: leave them running
                     break
                 continue
             except StopAsyncIteration:
