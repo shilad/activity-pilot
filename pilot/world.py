@@ -52,9 +52,10 @@ class Context:
 
     def __init__(self, *, cfg, run_id: str, run_dir: Path, workspace: Path, repo: Path, home: Path | None,
                  tutor_config: Path | None, settings: dict, persona: str, log, side_turn, tutor_view, notify,
-                 tutor_busy):
+                 tutor_busy, from_run: str | None = None):
         self.cfg, self.run_id, self.run_dir, self.workspace, self.repo = cfg, run_id, run_dir, workspace, repo
         self.home, self.tutor_config, self.settings, self.persona = home, tutor_config, settings, persona
+        self.from_run = from_run  # the earlier run this one continues (a later sitting on the same laptop), or None
         self._log, self._side, self._view, self._notify, self._busy = log, side_turn, tutor_view, notify, tutor_busy
 
     def log(self, text: str) -> None:
@@ -70,7 +71,8 @@ class Context:
 
     async def side_turn(self, prompt: str, label: str) -> dict:
         """Run one student turn now, while the tutor works, and record it (kind "side", with `label`). What the
-        student writes is not sent to the tutor. Returns the recorded turn (its text, tools, seconds)."""
+        student types in it is queued for the tutor, as real Claude Code queues a message typed during a reply
+        (if the reply has ended, it becomes the next message). Returns the recorded turn (text, tools, seconds)."""
         return await self._side(prompt, label)
 
     def notify(self, text: str) -> None:

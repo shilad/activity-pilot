@@ -153,3 +153,15 @@ def test_write_facts_regenerates_identically(tmp_path):
     (run / "facts.json").unlink()
     assert facts.write_facts(run, cfg).read_text() == first
     assert json.loads(first)["cost_usd"]["tutor"] == 0.40
+
+
+def test_rubric_per_run(tmp_path):
+    cfg, run = make(tmp_path)
+    (cfg.runs_dir.parent / "rubric-p1.md").write_text("- **P1** one\n- **P2** two\n- **ONE_LEVER** x\n")
+    assert facts.rubric_path(run, cfg).name == "rubric.md"
+    data = json.loads((run / "run.json").read_text())
+    (run / "run.json").write_text(json.dumps({**data, "rubric": "rubric-p1.md"}))
+    assert facts.rubric_path(run, cfg).name == "rubric-p1.md"
+    assert facts.rubric_path(run, cfg, "rubric.md").name == "rubric.md"
+    text = facts.sheet(run, cfg, "AB").read_text()
+    assert "| P1 |" in text and "| P2 |" in text and "| T1 |" not in text

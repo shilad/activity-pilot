@@ -147,6 +147,7 @@ def render_turn(turn: dict, *, for_student: bool = False) -> str:
         word = "approved" if p.get("decision") == "allow" else "denied"
         out.append(f"> [{word}] {p.get('tool')}({p.get('summary')})")
     out += [f"> [question] {a.get('question')} · answer: {a.get('answer')}" for a in turn.get("asks") or []]
+    out += [f"> [typed while Claude worked] {q.get('text')}" for q in turn.get("queued") or []]
     if for_student:
         return "\n".join(out) + "\n"
     if event := turn.get("event"):
@@ -377,9 +378,16 @@ def report(cfg) -> str:
     return "\n".join(lines) + "\n" + empty + note + _agreement(dirs)
 
 
-def sheet(run_dir: Path, cfg, initials: str) -> Path:
+def rubric_path(run_dir: Path, cfg, override: str | None = None) -> Path:
+    """The rubric for a run: `override` (a file name in the assignment directory), else the one run.json names
+    (`pilot run --rubric`), else rubric.md."""
+    name = override or (_json(Path(run_dir) / "run.json") or {}).get("rubric") or "rubric.md"
+    return Path(cfg.runs_dir).parent / name
+
+
+def sheet(run_dir: Path, cfg, initials: str, rubric_file: str | None = None) -> Path:
     """A blank calibration sheet with one row per rubric item; never overwrites a sheet that exists."""
-    rubric = (Path(cfg.runs_dir).parent / "rubric.md").read_text(encoding="utf-8")
+    rubric = rubric_path(run_dir, cfg, rubric_file).read_text(encoding="utf-8")
     ids = [i for i in re.findall(r"^- \*\*(.+?)\*\*", rubric, re.M) if i != "ONE_LEVER"]
     text = "\n".join([f"# Calibration sheet: {Path(run_dir).name}, graded by {initials}", "",
                       "Grade each item C, P, I or n/o; under turns, list the exchange numbers the grade rests on.", "",

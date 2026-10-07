@@ -3,6 +3,7 @@ terminal (`claude mcp reset-project-choices` through the stand-in, then `cd <rep
 (approved), /resume and the picker, and a message to the reopened conversation. No model is called; the real CLI runs
 only for `claude mcp reset-project-choices`, which needs no login."""
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -106,7 +107,8 @@ def test_restart_flow(tmp_path):
     kinds = [(t["actor"], t.get("kind", "message")) for t in turns]
     assert kinds == [("student", "approval"), ("student", "message"), ("tutor", "message"), ("student", "message"),
                      ("student", "terminal"), ("student", "approval"), ("student", "message"), ("student", "picker"),
-                     ("student", "message"), ("tutor", "message"), ("student", "message")]
+                     ("student", "message"), ("tutor", "message"), ("student", "message"), ("tutor", "message")]
+    assert turns[-1]["stop"] == "left" and FakeTutor.made[1].prompt == "thanks"  # the last words still got a reply
     term = turns[4]
     assert term["event"]["type"] == "start" and term["event"]["cwd"] == str(repo)
     assert "have been reset" in term["tools"][0]["result"] and "is open in this window" in term["tools"][1]["result"]
@@ -116,3 +118,84 @@ def test_restart_flow(tmp_path):
     # the claude placed in the run's home is the bundled CLI, reached without any path that names the library
     claude = Path(data["home"]) / ".local" / "bin" / "claude"
     assert claude.is_symlink() and "pilot" not in str(claude.resolve()).lower()
+
+
+class QueueTutor(FakeTutor):
+    """A tutor whose first reply is still running when the world starts a side turn; a message queued meanwhile is
+    answered right after that reply, as the CLI does when it cannot absorb it mid-reply."""
+    hook = None
+
+    async def query(self, prompt):
+        self.queue = getattr(self, "queue", []) + [prompt]
+
+    async def receive_response(self):
+        prompt = self.queue.pop(0)
+        self.prompt = prompt
+        yield AssistantMessage(content=[TextBlock(text=f"Working on: {prompt[:30]}")], model="fake",
+                               session_id=self.sid)
+        if prompt == "open the tab" and QueueTutor.hook:
+            await QueueTutor.hook()
+        yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
+                            session_id=self.sid, total_cost_usd=0.0, usage={}, model_usage={})
+
+
+def test_typed_while_working_reaches_the_tutor(tmp_path):
+    adir = _assignment(tmp_path)
+    (adir / "w.py").write_text("CTX = {}\ndef make_world(ctx):\n    CTX['ctx'] = ctx\n    return object()\n")
+    toml = (adir / "pilot.toml").read_text().replace('approve_servers = ["colab"]\n', "") + 'world = "w.py"\n'
+    (adir / "pilot.toml").write_text(toml.replace("restarts = true\n", ""))
+    cfg = run.load_config(adir)
+
+    def script(prompt, st):
+        if prompt.startswith("You have just opened"):
+            return [("say", "open the tab")]
+        if prompt.startswith("(side)"):
+            return [("say", "wait, is Connect safe?")]
+        return [("say", "ok\n(leaves)")]
+
+    async def hook():
+        import sys
+        ctx = sys.modules[[m for m in sys.modules if m.startswith("pilot_world_")][-1]].CTX["ctx"]
+        assert ctx.tutor_busy() and "Working on: open the tab" in ctx.tutor_text()
+        await ctx.side_turn("(side) a tab opened", "test")
+    QueueTutor.hook = hook
+    out = run.run_one(cfg, "jordan", tutor=QueueTutor,
+                      student=lambda env, tools, cwd: ScriptedStudent(script, env=env, tools=tools, cwd=cwd))
+    turns = facts.load_turns(out)
+    side = next(t for t in turns if t.get("kind") == "side")
+    tutor1 = next(t for t in turns if t["actor"] == "tutor")
+    assert side["sent"] == "queued" and tutor1["queued"][0]["text"] == "wait, is Connect safe?"
+    assert "Working on: wait, is Connect safe?" in tutor1["text"]  # answered within the same exchange
+    assert "[typed while Claude worked] wait, is Connect safe?" in (out / "transcript.md").read_text()
+
+
+def test_from_run_copies_and_rewrites(tmp_path):
+    cfg = run.load_config(_assignment(tmp_path))
+    first = run.run_one(cfg, "jordan", tutor=FakeTutor, student=lambda env, tools, cwd: ScriptedStudent(
+        lambda p, st: [("say", "Use this MCP server" if "New MCP" in p else "bye\n(leaves)")], env=env, tools=tools,
+        cwd=cwd))
+    old = json.loads((first / "run.json").read_text())
+    old_ws, old_repo = Path(old["workspace"]), Path(old["repo"])
+    old_a = Path(old["config_dirs"]["tutor"])
+    session_dir = old_a / "projects" / run.munged(old_repo)
+    session_dir.mkdir(parents=True)
+    (session_dir / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(old_repo)}) + "\n")
+    second = run.run_one(cfg, "jordan", from_run=old_ws.name, tutor=FakeTutor, student=lambda env, tools, cwd:
+                         ScriptedStudent(lambda p, st: [("say", "bye\n(leaves)")], env=env, tools=tools, cwd=cwd))
+    new = json.loads((second / "run.json").read_text())
+    new_repo, new_a = Path(new["repo"]), Path(new["config_dirs"]["tutor"])
+    assert new["from_run"]["run"] == old_ws.name and new_repo != old_repo and new_repo.is_dir()
+    assert str(new_repo) in json.loads((new_a / ".claude.json").read_text())["projects"]
+    moved = new_a / "projects" / run.munged(new_repo) / "s1.jsonl"
+    assert json.loads(moved.read_text())["cwd"] == str(new_repo)
+    assert terminal.server_choice(new_repo, "colab") == "yes"  # the approval carried over: no question this time
+    assert not any(t.get("kind") == "approval" for t in facts.load_turns(second))
+    claude = Path(new["home"]) / ".local" / "bin" / "claude"
+    assert str(claude.resolve()).startswith(new["home"])  # points into the new home, not the old one
+    assert json.loads((session_dir / "s1.jsonl").read_text())["cwd"] == str(old_repo)  # the old run is untouched
+    for path in Path(new["workspace"]).rglob("*"):
+        if path.is_file() and "objects" not in path.parts and path.stat().st_size < run.LINK_BYTES:
+            try:
+                assert not re.search(re.escape(str(old_ws)) + r"(?![\w-])", path.read_text()), path
+            except UnicodeDecodeError:
+                pass

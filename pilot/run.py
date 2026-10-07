@@ -48,6 +48,12 @@ UV_CACHE = ".cache/uv"  # under work_dir: one package cache shared by every run 
 SILENT_PROMPT = "Type your next message to Claude."
 RETRY_PROMPT = "Send only your own next message to Claude, nothing else."
 LEAVES = "(leaves)"
+QUEUE_WAIT_S = 4  # after a reply ends, how long to wait for the CLI to answer a message typed during it
+
+
+def without_leaves(text: str) -> str:
+    """The message with its "(leaves)" line taken out: what reaches Claude before the student goes."""
+    return "\n".join(line for line in text.splitlines() if line.strip() != LEAVES).strip()
 TUTOR_SIDE = ("The assistant replied", "Assistant:", "Claude:", "Claude replied", "Tutor:")
 ECHO_CHARS = 200  # a student message sharing this many consecutive characters with the tutor's last text is an echo
 RESULT_FIELDS = ("total_cost_usd", "num_turns", "duration_ms", "is_error", "subtype", "usage", "model_usage")
@@ -308,10 +314,66 @@ def host_path() -> list[str]:
     return [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and not p.startswith(venv)]
 
 
-def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
-    """Claim a run id, export the template into a fresh git repo (or reuse `repo`), write trust, run setup."""
+LINK_BYTES = 5_000_000  # copying an earlier run: files this big are hard-linked (binaries), smaller ones copied
+
+
+def munged(path) -> str:
+    """The CLI's folder name for a project under <config>/projects/: the path with every other character a dash."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def _copy_run(old_ws: Path, old_root: Path, new_ws: Path, new_root: Path) -> list[str]:
+    """Copy an earlier run's workspace and its tutor settings and home folder (not the student's) to a new run id,
+    then rewrite the old paths to the new ones in every text file and symlink, so nothing points back. Returns the
+    folders copied."""
+    def copy(src, dst):
+        if os.path.getsize(src) >= LINK_BYTES:
+            with contextlib.suppress(OSError):
+                return os.link(src, dst)
+        return shutil.copy2(src, dst)
+    pairs = [(old_ws, new_ws)] + [(old_root / sub, new_root / sub) for sub in ("a", "home") if (old_root / sub).is_dir()]
+    for src, dst in pairs:
+        shutil.copytree(src, dst, symlinks=True, copy_function=copy)
+    swaps = [(str(old_root), str(new_root)), (str(old_ws), str(new_ws))]
+    swaps += [(munged(old), munged(new)) for old, new in swaps]
+    for _, dst in pairs:
+        for path in sorted(dst.rglob("*"), key=lambda p: -len(p.parts)):  # deepest first, so renames are safe
+            if path.is_symlink():
+                target = os.readlink(path)
+                if (new := _swap(target, swaps)) != target:
+                    path.unlink()
+                    path.symlink_to(new)
+            elif path.is_file() and "objects" not in path.parts and path.stat().st_size < LINK_BYTES:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if (new := _swap(text, swaps)) != text:
+                    (tmp := path.with_name(path.name + ".rewrite")).write_text(new, encoding="utf-8")
+                    shutil.copymode(path, tmp)
+                    os.replace(tmp, path)  # a new file: a hard link back to the old run is never written through
+            if (name := _swap(path.name, swaps)) != path.name:
+                path.rename(path.with_name(name))
+    return [str(src) for src, _ in pairs]
+
+
+def _swap(text: str, swaps) -> str:
+    for old, new in swaps:
+        text = text.replace(old, new)
+    return text
+
+
+def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None = None) -> dict:
+    """Claim a run id, export the template into a fresh git repo (or reuse `repo`, or copy the earlier run
+    `from_run`: its workspace, the tutor's settings and the home folder), write trust, run setup."""
     tpl, base = cfg.template, f"{persona['first']}-{datetime.now():%m%d-%H%M}"
-    if repo is None:
+    if from_run:
+        old_ws, old_root = cfg.work_dir / from_run, cfg.work_dir / ".home" / from_run
+        if not (old_ws / (cfg.repo_name or tpl.name) / ".git").exists():
+            raise ConfigError(f"--from-run {from_run}: no repository at {old_ws / (cfg.repo_name or tpl.name)}")
+        if bad := [w for w in LEAK_WORDS if w in from_run.lower()]:
+            raise ConfigError(f"--from-run {from_run} contains {', '.join(bad)}")
+    elif repo is None:
         if _git(tpl, "status", "--porcelain", "--untracked-files=no", "--", ".").strip():
             raise ConfigError(f"template {tpl} has uncommitted changes to tracked files; commit them first")
         if not (files := [f for f in _git(tpl, "ls-files", "-z").split("\0") if f]):
@@ -329,7 +391,11 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
                 (cfg.runs_dir / run_id).mkdir()
                 break
     run_dir, ws, upstream = cfg.runs_dir / run_id, cfg.work_dir / run_id, {"url": cfg.upstream_url, "local": None}
-    (ws / "tmp").mkdir(parents=True)
+    copied = None
+    if from_run:  # the same laptop, a later sitting: the copy keeps the repo, origin, home folder and tutor settings
+        copied = _copy_run(old_ws, old_root, ws, cfg.work_dir / ".home" / run_id)
+        repo = ws / (cfg.repo_name or tpl.name)
+    (ws / "tmp").mkdir(parents=True, exist_ok=True)
     if repo is None:
         repo = ws / name
         for f in files:  # tracked files only, so untracked notes, logs and local settings never travel
@@ -362,6 +428,11 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
         creds = Path.home() / ".claude" / ".credentials.json"
         for actor, sub in (("tutor", "a"), ("student", "b")):
             d = dirs[actor] = cfg.work_dir / ".home" / run_id / sub
+            if (d / ".claude.json").exists():  # copied from the earlier run: keep it, make sure of the trust entry
+                data = json.loads((d / ".claude.json").read_text(encoding="utf-8"))
+                data.setdefault("projects", {}).setdefault(str(repo), {}).update(trust)
+                _write_json(d / ".claude.json", data)
+                continue
             d.mkdir(parents=True)
             _write_json(d / ".claude.json", {"hasCompletedOnboarding": True, "projects": {str(repo): trust}})
             if creds.exists():
@@ -372,7 +443,8 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
         home = cfg.work_dir / ".home" / run_id / "home"
         for d in ("Downloads", ".local/bin"):
             (home / d).mkdir(parents=True, exist_ok=True)
-        cli = _install_claude(home, version)
+        installed = home / ".local" / "share" / "claude" / "versions" / (version or "current")
+        cli = installed if installed.exists() else _install_claude(home, version)
     if cfg.run_home or cfg.run_path:
         path = ([str(home / ".local" / "bin")] if home else []) + (list(cfg.run_path) or host_path())
     python = shutil.which("python3", path=os.pathsep.join(path or host_path())) or "/usr/bin/python3"
@@ -396,7 +468,8 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
             "upstream": upstream, "config_dirs": dirs, "template_commit": _git(tpl, "rev-parse", "HEAD").strip(),
             "claude_version": _claude_version({"CLAUDE_CONFIG_DIR": str(dirs["tutor"])} if dirs["tutor"] else {}, cli),
             "setup_seconds": round(time.monotonic() - t0, 1), "setup_error": setup_error,
-            "home": home, "path": path, "terminal": terminal_dir, "cli": cli, "python": python}
+            "home": home, "path": path, "terminal": terminal_dir, "cli": cli, "python": python,
+            "from_run": {"run": from_run, "copied": copied} if from_run else None}
 
 
 def student_denial(name: str, inp: dict, repo: Path, edits, bash: bool, extra=()) -> str | None:
@@ -558,6 +631,18 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
     async def drain():
         async for msg in client.receive_response():
             take(msg)
+        handled = 0  # messages the student typed while this reply ran (turn["queued"], added by the run loop)
+        while len(turn.get("queued") or []) > handled:  # the CLI absorbs them mid-reply, or answers them after it
+            handled = len(turn["queued"])
+            gen = client.receive_response()
+            try:
+                first = await asyncio.wait_for(gen.__anext__(), QUEUE_WAIT_S)
+            except (asyncio.TimeoutError, StopAsyncIteration):
+                break  # absorbed into the reply already drained: nothing more comes
+            take(first)
+            if not isinstance(first, ResultMessage):
+                async for msg in gen:
+                    take(msg)
 
     try:
         await client.query(prompt)
@@ -720,7 +805,9 @@ def _stop(turn: dict, status: str, cost: dict, cfg: Config, silent_ok: bool = Fa
     sub, student, lines = (turn["result"] or {}).get("subtype"), turn["actor"] == "student", turn["text"].splitlines()
     for hit, why in ((status == "timeout", "timeout"), (sub == "error_max_budget_usd", "budget"),
                      (student and sub == "error_max_turns", "student_loop"), (status == "error", "error"),
-                     (turn["finish_seen"], "finished"), (student and LEAVES in map(str.strip, lines), "left"),
+                     (turn["finish_seen"], "finished"),
+                     (student and LEAVES in map(str.strip, lines) and not (turn.get("kind") in (None, "message")
+                                                                           and without_leaves(turn["text"])), "left"),
                      (student and not silent_ok and not turn["text"].strip(), "student_silent"),
                      (cost["tutor"] + cost["student"] >= cfg.max_usd, "budget")):
         if hit:
@@ -746,7 +833,8 @@ def _gate(cfg: Config, repo: Path, run_dir: Path, env: dict | None = None) -> No
 
 
 def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int | None = None,
-            scenario: list[str] | None = None, student=None, tutor=None) -> Path:
+            scenario: list[str] | None = None, student=None, tutor=None, from_run: str | None = None,
+            rubric: str | None = None) -> Path:
     """Run one persona against the template and return the run directory. Raises ConfigError before starting.
     `scenario` lists --scenario picks: `key=value` settings or preset names from pilot.toml. `student`, for probes
     and tests, makes the student's client instead of a model session: student(env, tools_by_name, cwd), e.g.
@@ -763,8 +851,12 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
     if "CLAUDE_CODE_OAUTH_TOKEN" in env:  # from oauth_token_file; never recorded (see SECRETS)
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = env["CLAUDE_CODE_OAUTH_TOKEN"]
     who = load_persona(cfg, persona)
-    sb = build_sandbox(cfg, who, repo=repo)
-    sb["scenario"] = picked
+    if from_run and repo:
+        raise ConfigError("--from-run and --repo cannot be combined")
+    if rubric and not (cfg.assignment_dir / rubric).is_file():
+        raise ConfigError(f"--rubric {rubric}: no such file in {cfg.assignment_dir}")
+    sb = build_sandbox(cfg, who, repo=repo, from_run=from_run)
+    sb["scenario"], sb["rubric"] = picked, rubric
     asyncio.run(_drive(cfg, who, sb, stripped, turns or cfg.max_turns, student, tutor))
     return sb["run_dir"]
 
@@ -789,6 +881,7 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
            "upstream": sb["upstream"], "error": None,
            "persona_sha256": hashlib.sha256(persona["raw"].encode()).hexdigest(),
            "scenario": scenario, "home": str(home) if home else None, "tutor_sessions": [], "restarts": [],
+           "from_run": sb.get("from_run"), "rubric": sb.get("rubric") or "rubric.md",
            "approvals": [],
            "config": {k: str(v) if isinstance(v, Path) else list(v) if isinstance(v, tuple) else v
                       for k, v in asdict(cfg).items()}}
@@ -798,26 +891,48 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             f" · started {run['started']}" + (f" · scenario {', '.join(scenario['names'])}" if scenario["names"]
                                               else "") + "\n\n")
     state = {"tutor_turn": None, "student_turn": None, "left": False, "cost": {"tutor": 0.0, "student": 0.0},
-             "student_lock": asyncio.Lock(), "notices": [], "exchange": 1, "open_tutor": None}
+             "student_lock": asyncio.Lock(), "notices": [], "exchange": 1, "open_tutor": None, "typed": None,
+             "sides": 0, "sides_done": asyncio.Event()}
+    state["sides_done"].set()
     ended_by, error, open_turn, prev, tutor_text, sessions = None, sb["setup_error"], None, None, "", {}
     finish = finish_matcher(cfg)
     tutor, student, world = None, None, None
     known: dict[str, dict] = {}  # tutor session id -> {"id", "first", "messages", "last", "cwd"}, for the picker
 
     async def side_turn(prompt: str, label: str) -> dict:
-        """A student turn while the tutor works (the world's): recorded, never sent to the tutor."""
-        async with state["student_lock"]:
-            turn = state["student_turn"] = {**_new_turn(state["exchange"], "student"), "kind": "side", "label": label}
-            await ask(student, prompt, turn, cfg.turn_timeout_s, split=True)
-        _cost(state["cost"], "student", turn)
-        record_turn(run_dir, turn)
-        return turn
+        """A student turn while the tutor works (the world's). What the student types in it goes to Claude as real
+        Claude Code sends a message typed during a reply: queued now, and the CLI shows it to the model at its next
+        step (between tool calls) or answers it right after the reply. If the reply has already ended, it is the
+        student's next message."""
+        state["sides"] += 1
+        state["sides_done"].clear()
+        try:
+            async with state["student_lock"]:
+                turn = state["student_turn"] = {**_new_turn(state["exchange"], "student"), "kind": "side",
+                                                "label": label}
+                await ask(student, prompt, turn, cfg.turn_timeout_s, split=True)
+            _cost(state["cost"], "student", turn)
+            state["left"] = state["left"] or LEAVES in map(str.strip, turn["text"].splitlines())
+            if typed := without_leaves(turn["text"]):
+                if state["open_tutor"] is not None and tutor is not None:
+                    state["open_tutor"].setdefault("queued", []).append({"text": typed, "t": _now()})
+                    turn["sent"] = "queued"
+                    await tutor.query(typed)
+                else:
+                    state["typed"], turn["sent"] = typed, "next_message"
+            record_turn(run_dir, turn)
+            return turn
+        finally:
+            state["sides"] -= 1
+            if not state["sides"]:
+                state["sides_done"].set()
 
     ctx = Context(cfg=cfg, run_id=sb["run_id"], run_dir=run_dir, workspace=sb["workspace"], repo=repo, home=home,
                   tutor_config=sb["config_dirs"]["tutor"], settings=scenario["settings"], persona=persona["key"],
                   log=lambda text: log.write(f"[world] {text}\n"), side_turn=side_turn,
                   tutor_view=lambda: _render_turn(state["open_tutor"], for_student=True) if state["open_tutor"] else "",
-                  notify=state["notices"].append, tutor_busy=lambda: state["open_tutor"] is not None)
+                  notify=state["notices"].append, tutor_busy=lambda: state["open_tutor"] is not None,
+                  from_run=(sb.get("from_run") or {}).get("run"))
     if cfg.world and not error:
         try:
             world = load_world(cfg.assignment_dir / cfg.world, ctx)
@@ -975,6 +1090,10 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         message, typed, exchange = FIRST_PROMPT, None, 0
         launch = None  # Claude Code started from the terminal, its conversation not chosen yet: {"path", "cwd"}
         while True:
+            await state["sides_done"].wait()  # a side turn still running finishes before the next student turn
+            if typed is None and state["typed"] and (tutor or launch):  # typed after the reply ended: it goes next
+                typed, state["typed"] = state["typed"], None
+                exchange += 1
             if typed is None:
                 exchange += 1
                 if exchange > limit:
@@ -1023,7 +1142,8 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                         message = (RESUMED_PROMPT if resume else STARTED_PROMPT).format(cwd=cwd)
                         continue
                 else:
-                    typed = turn["text"]
+                    typed = without_leaves(turn["text"])  # a last message before leaving still reaches Claude
+                    state["left"] = state["left"] or LEAVES in map(str.strip, turn["text"].splitlines())
             text, typed = typed, None
             if cfg.restarts and terminal.is_exit(text):
                 if tutor:
