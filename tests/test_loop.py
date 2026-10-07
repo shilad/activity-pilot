@@ -224,6 +224,12 @@ class StreamTutor:
                              session_id=self.sid, total_cost_usd=0.0, usage={}, model_usage={})
 
     async def query(self, prompt):
+        if prompt.startswith("serve"):  # a server started in the background: it never ends
+            await self.q.put(TaskStartedMessage(subtype="task_started", data={}, task_id="b1", task_type="local_bash",
+                                                description="python3 serve.py", uuid="u3", session_id=self.sid))
+            await self.q.put(AssistantMessage(content=[TextBlock(text="The viewer is running.")], model="fake"))
+            await self.q.put(self._result())
+            return
         if prompt.startswith("grade"):
             await self.q.put(TaskStartedMessage(subtype="task_started", data={}, task_id="t1",
                                                 description="Grade batch 01", uuid="u1", session_id=self.sid))
@@ -266,3 +272,17 @@ def test_background_work_finishes_inside_the_reply(tmp_path):
     assert "The graders are running." in turns[0]["text"] and "All graders finished." in turns[0]["text"]
     assert turns[0]["background"]["started"] == ["Grade batch 01"] and turns[0]["background"]["waited_s"] >= 1
     assert turns[1]["text"] == "Reply to thanks"  # the next reply is not mixed up with the earlier one
+
+
+def test_a_background_server_is_not_waited_for(tmp_path, monkeypatch):
+    adir = _assignment(tmp_path)
+    toml = (adir / "pilot.toml").read_text().replace('approve_servers = ["colab"]\n', "").replace("restarts = true\n",
+                                                                                                    "")
+    (adir / "pilot.toml").write_text(toml)
+    monkeypatch.setattr(run, "SHELL_QUIET_S", 1)
+    msgs = iter(["serve it", "next", "bye\n(leaves)"])
+    out = run.run_one(run.load_config(adir), "jordan", tutor=StreamTutor, student=lambda env, tools, cwd:
+                      ScriptedStudent(lambda p, st: [("say", next(msgs))], env=env, tools=tools, cwd=cwd))
+    turns = [t for t in facts.load_turns(out) if t["actor"] == "tutor"]
+    assert turns[0]["background"]["waited_s"] < 5 and "background" not in turns[1]  # waited once, briefly
+    assert turns[1]["text"] == "Reply to next"
