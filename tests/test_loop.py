@@ -2,6 +2,7 @@
 terminal (`claude mcp reset-project-choices` through the stand-in, then `cd <repo> && claude`), the question again
 (approved), /resume and the picker, and a message to the reopened conversation. No model is called; the real CLI runs
 only for `claude mcp reset-project-choices`, which needs no login."""
+import asyncio
 import json
 import re
 import shutil
@@ -9,7 +10,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
+from claude_agent_sdk import (AssistantMessage, ResultMessage, SystemMessage, TaskNotificationMessage, TaskStartedMessage,
+                              TextBlock)
 
 from pilot import facts, run, terminal
 from pilot.scripted import ScriptedStudent
@@ -199,3 +201,68 @@ def test_from_run_copies_and_rewrites(tmp_path):
                 assert not re.search(re.escape(str(old_ws)) + r"(?![\w-])", path.read_text()), path
             except UnicodeDecodeError:
                 pass
+
+
+class StreamTutor:
+    """A tutor on one message stream, like the CLI's: its first reply starts a background task and ends; the
+    task's end arrives a moment later, and Claude carries on alone with one more reply."""
+
+    def __init__(self, opts):
+        self.opts, self.q, self.sid = opts, asyncio.Queue(), "s-bg"
+
+    async def connect(self):
+        return None
+
+    async def disconnect(self):
+        return None
+
+    async def interrupt(self):
+        return None
+
+    def _result(self):
+        return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
+                             session_id=self.sid, total_cost_usd=0.0, usage={}, model_usage={})
+
+    async def query(self, prompt):
+        if prompt.startswith("grade"):
+            await self.q.put(TaskStartedMessage(subtype="task_started", data={}, task_id="t1",
+                                                description="Grade batch 01", uuid="u1", session_id=self.sid))
+            await self.q.put(AssistantMessage(content=[TextBlock(text="The graders are running.")], model="fake"))
+            await self.q.put(self._result())
+
+            async def later():
+                await asyncio.sleep(1.5)
+                await self.q.put(TaskNotificationMessage(subtype="task_notification", data={}, task_id="t1",
+                                                         status="completed", output_file="", summary="done",
+                                                         uuid="u2", session_id=self.sid))
+                await self.q.put(AssistantMessage(content=[TextBlock(text="All graders finished.")], model="fake"))
+                await self.q.put(self._result())
+            asyncio.get_running_loop().create_task(later())
+        else:
+            await self.q.put(AssistantMessage(content=[TextBlock(text=f"Reply to {prompt}")], model="fake"))
+            await self.q.put(self._result())
+
+    async def receive_messages(self):
+        while True:
+            yield await self.q.get()
+
+    async def receive_response(self):
+        async for m in self.receive_messages():
+            yield m
+            if isinstance(m, ResultMessage):
+                return
+
+
+def test_background_work_finishes_inside_the_reply(tmp_path):
+    adir = _assignment(tmp_path)
+    toml = (adir / "pilot.toml").read_text().replace('approve_servers = ["colab"]\n', "").replace("restarts = true\n",
+                                                                                                    "")
+    (adir / "pilot.toml").write_text(toml)
+    cfg = run.load_config(adir)
+    msgs = iter(["grade it", "thanks\n(leaves)"])
+    out = run.run_one(cfg, "jordan", tutor=StreamTutor, student=lambda env, tools, cwd: ScriptedStudent(
+        lambda p, st: [("say", next(msgs))], env=env, tools=tools, cwd=cwd))
+    turns = [t for t in facts.load_turns(out) if t["actor"] == "tutor"]
+    assert "The graders are running." in turns[0]["text"] and "All graders finished." in turns[0]["text"]
+    assert turns[0]["background"]["started"] == ["Grade batch 01"] and turns[0]["background"]["waited_s"] >= 1
+    assert turns[1]["text"] == "Reply to thanks"  # the next reply is not mixed up with the earlier one

@@ -13,7 +13,8 @@ from pathlib import Path
 import claude_agent_sdk as sdk
 from claude_agent_sdk import (AssistantMessage, CanUseToolShadowedWarning, ClaudeAgentOptions, ClaudeSDKClient,
                               HookEventMessage, HookMatcher, PermissionResultAllow, PermissionResultDeny, ResultMessage,
-                              SystemMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage)
+                              SystemMessage, TaskNotificationMessage, TaskStartedMessage, TaskUpdatedMessage, TextBlock,
+                              ToolResultBlock, ToolUseBlock, UserMessage)
 
 STUDENT_TAIL_LINES = 8  # tool output lines per tool call in the tutor's reply as the student sees it (fallback view)
 STUDENT_MAX_TURNS = 12  # the SDK's max_turns per student message; reaching it ends the run as student_loop
@@ -49,6 +50,8 @@ SILENT_PROMPT = "Type your next message to Claude."
 RETRY_PROMPT = "Send only your own next message to Claude, nothing else."
 LEAVES = "(leaves)"
 QUEUE_WAIT_S = 4  # after a reply ends, how long to wait for the CLI to answer a message typed during it
+BACKGROUND_WAIT_S = 1200  # how long a reply may wait for background work it started (graders, a long command)
+DONE = ("completed", "failed", "killed", "stopped", "cancelled", "error")  # a background task's last states
 
 
 def without_leaves(text: str) -> str:
@@ -583,10 +586,19 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
     the message it types to Claude: it goes to `narration`, and `text` is what came after the last tool call."""
     t0, pending, texts, narr, status = time.monotonic(), {}, [], [], ["ok", ""]
     turn["text"] = ""
+    tasks = client.__dict__.setdefault("_pilot_tasks", {})  # background tasks still running: id -> description
     match = finish if callable(finish) else (lambda line: bool(finish) and line.strip() == finish)
 
     def take(msg):
-        if isinstance(msg, HookEventMessage) and msg.subtype == "hook_response":
+        if isinstance(msg, TaskStartedMessage):
+            tasks[msg.task_id] = msg.description
+            turn.setdefault("background", {"started": [], "finished": [], "waited_s": 0})["started"].append(
+                msg.description[:200])
+        elif isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)) and msg.status in DONE:
+            if (what := tasks.pop(msg.task_id, None)) is not None:
+                turn.setdefault("background", {"started": [], "finished": [], "waited_s": 0})["finished"].append(
+                    f"{what[:200]}: {msg.status}")
+        elif isinstance(msg, HookEventMessage) and msg.subtype == "hook_response":
             out = str(msg.data.get("output") or msg.data.get("stderr") or msg.data.get("stdout") or "")
             turn["hooks"].append({"event": msg.hook_event_name, "output": out[:200],
                                   "ok": msg.data.get("outcome") == "success" or msg.data.get("exit_code") == 0})
@@ -643,6 +655,27 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
             if not isinstance(first, ResultMessage):
                 async for msg in gen:
                     take(msg)
+        if tasks:  # work the reply left running: Claude Code reports each task's end and may then carry on alone
+            await settle()
+
+    async def settle():
+        """Read on until every background task has ended and the CLI has been quiet for QUEUE_WAIT_S. Real
+        students may type meanwhile; here the student waits, and what Claude says when the work ends joins this
+        reply."""
+        start = time.monotonic()
+        while time.monotonic() - start < BACKGROUND_WAIT_S:
+            gen = client.receive_messages()
+            try:
+                msg = await asyncio.wait_for(gen.__anext__(), QUEUE_WAIT_S if not tasks else 60)
+            except asyncio.TimeoutError:
+                if not tasks:
+                    break
+                continue
+            except StopAsyncIteration:
+                break
+            take(msg)
+        turn.setdefault("background", {"started": [], "finished": [], "waited_s": 0})["waited_s"] = round(
+            time.monotonic() - start, 1)
 
     try:
         await client.query(prompt)

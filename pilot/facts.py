@@ -148,6 +148,9 @@ def render_turn(turn: dict, *, for_student: bool = False) -> str:
         out.append(f"> [{word}] {p.get('tool')}({p.get('summary')})")
     out += [f"> [question] {a.get('question')} · answer: {a.get('answer')}" for a in turn.get("asks") or []]
     out += [f"> [typed while Claude worked] {q.get('text')}" for q in turn.get("queued") or []]
+    if bg := turn.get("background"):
+        out.append(f"> [background] {len(bg.get('started') or [])} started, {len(bg.get('finished') or [])} ended; "
+                   f"the reply waited {bg.get('waited_s')} s for them")
     if for_student:
         return "\n".join(out) + "\n"
     if event := turn.get("event"):

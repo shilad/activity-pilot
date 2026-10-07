@@ -199,6 +199,9 @@ count only messages for words, drift and silence.
   as real Claude Code queues a message typed during a reply: the CLI shows it to the model at its next step
   (between tool calls), or answers it right after the reply (pilot waits a few seconds for that answer). If the
   reply has already ended, it is the student's next message. The tutor's turn lists it under `queued`.
+- **Background work.** When a reply leaves work running (graders launched as background agents, a long command),
+  pilot keeps reading until every task has ended and the CLI is quiet, so what Claude says when the work ends
+  joins that reply (`background` on the tutor's turn). A real student could type meanwhile; here they wait.
 - **Fabricated tutor turns detected and re-asked.** A student message that writes the tutor's side is re-asked
   once and recorded (`fabrication` per turn, `student_wrote_tutor_side` in facts).
 - **Drift and fidelity reported per run.** `persona_drift` compares early and late message length; the
