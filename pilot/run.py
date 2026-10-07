@@ -45,6 +45,8 @@ RESUMED_PROMPT = "Claude Code reopened that conversation; its earlier messages a
 PICKER_SCREEN = "Claude Code shows:\n\n{screen}"
 NOTICE = "Meanwhile, on your screen:\n{text}\n\n"
 NO_APPS = "Nothing else is open: no browser, no other apps."  # in prompts/student.md; a world's note replaces it
+TODAY = ("Today is {date}. Where your sheet names another day or date, keep its time of day and how much time you "
+         "have, but the date is today's: your laptop and Claude show it.")  # tell_date
 UV_CACHE = ".cache/uv"  # under work_dir: one package cache shared by every run with a home folder
 SILENT_PROMPT = "Type your next message to Claude."
 RETRY_PROMPT = "Send only your own next message to Claude, nothing else."
@@ -144,6 +146,8 @@ class Config:
     approve_servers: tuple[str, ...] = ()  # .mcp.json servers whose start-up question the student answers
     restarts: bool = False  # the student may /exit Claude Code, use their terminal, and start it again with `claude`
     world: str = ""  # the assignment's world module (see pilot/world.py), relative to the assignment directory
+    tutor_sandbox: bool = False  # Claude Code's own sandbox for the tutor's commands: no reading outside the run
+    tell_date: bool = False  # tell the student today's real date, so a sheet's story date is not argued with
     settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
     scenarios: dict = field(default_factory=dict)  # named presets, [scenarios.<name>] tables of settings
 
@@ -225,6 +229,8 @@ def load_config(assignment_dir) -> Config:
     if vals["shared_config"] and vals["run_home"]:
         raise ConfigError("pilot.toml: shared_config and run_home cannot be combined (the CLI finds its settings "
                           "through HOME); use oauth_token_file for authentication instead")
+    if vals["tutor_sandbox"] and not vals["run_home"]:
+        raise ConfigError("pilot.toml: tutor_sandbox needs run_home = true (the sandbox denies reading the real home)")
     if (vals["approve_servers"] or vals["restarts"]) and "local" not in vals["tutor_setting_sources"]:
         raise ConfigError("pilot.toml: approve_servers and restarts need \"local\" in tutor_setting_sources, since "
                           "the CLI keeps server approvals in .claude/settings.local.json")
@@ -619,6 +625,36 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
     return tutor_tool, student_tool, student_hook
 
 
+def sandbox_settings(cfg, sb: dict, extra: dict | None = None) -> dict:
+    """Settings for Claude Code's own sandbox (macOS Seatbelt, Linux bubblewrap), passed with the SDK's settings
+    option (the CLI's --settings), never written into the repository. The tutor's commands may not read any home
+    folder or any other run: every folder beside the home folder and the work_dir are read-denied, and this run's
+    workspace, home and settings folders and the shared caches are allowed again. Writes go to the same places;
+    network and local servers stay open, and nothing is auto-approved, so permission prompts are as without it.
+    The Read, Edit and Write tools get the same limits as permission deny rules. `extra` (from the world) adds
+    allowRead, allowWrite and allowUnixSockets paths."""
+    extra = extra or {}
+    homes = Path.home().resolve().parent  # /Users on macOS, /home on Linux
+    run_root = cfg.work_dir / ".home" / sb["run_id"]
+    mine = [str(sb["workspace"]), str(run_root), str(cfg.work_dir / ".cache")]
+    keep = {Path(p).resolve() for p in mine}
+    others = [h for h in sorted(homes.iterdir()) if h.is_dir() and not any(k == h or h in k.parents for k in keep)]
+    others += [d for parent in (cfg.work_dir, cfg.work_dir / ".home") if parent.is_dir() for d in sorted(parent.iterdir())
+               if d.is_dir() and d.resolve() not in keep and d.name not in (".home", ".cache")]
+    rules = [f"{tool}(/{p}/**)" for p in map(str, others) for tool in ("Read", "Edit")]
+    return {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False, "allowUnsandboxedCommands": False,
+                        # The sandbox never lets a command write .git/config, which `git remote` (and a chain such
+                        # as `git remote add ... && git fetch ...`) must, so git runs outside it. Checked: reads
+                        # outside the run still fail for git (`git -C <denied folder> log`: Operation not permitted).
+                        "excludedCommands": ["git:*"],
+                        "filesystem": {"denyRead": [str(homes), str(cfg.work_dir)],
+                                       "allowRead": mine + list(extra.get("allowRead", [])),
+                                       "allowWrite": mine + list(extra.get("allowWrite", []))},
+                        "network": {"allowedDomains": ["*"], "allowLocalBinding": True,
+                                    "allowUnixSockets": list(extra.get("allowUnixSockets", []))}},
+            "permissions": {"deny": rules}}
+
+
 def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stderr, hook=None, *, env=None,
             resume=None, cwd=None, servers=None, extra_tools=(), prompt=None):
     """The SDK options for one actor. `env` is added to the actor's environment; for the tutor, `resume` reopens
@@ -628,11 +664,12 @@ def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stde
     common = dict(cwd=str(cwd or sb["repo"]), permission_mode="default", can_use_tool=can_use_tool,
                   max_budget_usd=cfg.max_usd, stderr=stderr, **({"cli_path": str(sb["cli"])} if sb.get("cli") else {}))
     if actor == "tutor":  # Claude Code itself: its real prompt, the template's settings, every prompt to the callback
+        flags = {"settings": json.dumps(sb["sandbox"])} if sb.get("sandbox") else {}
         return ClaudeAgentOptions(system_prompt={"type": "preset", "preset": "claude_code"},
                                   setting_sources=list(cfg.tutor_setting_sources), include_hook_events=True,
                                   model=cfg.tutor_model or None, effort=cfg.tutor_effort or None, resume=resume,
                                   env={**base, "TMPDIR": str(sb["workspace"] / "tmp"), **TUTOR_EXTRA_ENV,
-                                       **(env or {})}, **common)
+                                       **(env or {})}, **flags, **common)
     tools = STUDENT_TOOLS + (["Bash"] if cfg.student_bash else [])
     # allowed_tools approves these before can_use_tool is consulted, and reads inside the repo never prompt, so the
     # path policy runs in a PreToolUse hook, which the CLI calls before any permission rule.
@@ -1067,6 +1104,9 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             await (call(world, "start") or asyncio.sleep(0))
         except Exception as e:
             error = f"world module failed to start: {type(e).__name__}: {e}"[:1000]
+    if cfg.tutor_sandbox:
+        sb["sandbox"] = run["sandbox"] = sandbox_settings(cfg, sb, call(world, "tutor_sandbox", {}))
+        _write_json(run_dir / "run.json", run)
     wenv = dict(call(world, "tutor_env", {}) or {})
     wpath = wenv.pop("PATH", []) or []
     wpath = [wpath] if isinstance(wpath, str) else list(wpath)
@@ -1083,6 +1123,8 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
     prompt = persona["prompt"]
     if note := call(world, "student_note", ""):
         prompt = prompt.replace(NO_APPS, note.strip()) if NO_APPS in prompt else prompt + "\n\n" + note.strip()
+    if cfg.tell_date:
+        prompt += "\n\n" + TODAY.format(date=f"{datetime.now():%A, %B} {datetime.now().day}, {datetime.now():%Y}")
     tutor_tool, student_tool, student_hook = callbacks(cfg, persona, repo, state)
     warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)  # expected: the hook polices instead
     student = state["student"] = make_student(

@@ -91,6 +91,8 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | `approve_servers` | `[]` | `.mcp.json` servers whose start-up question the student answers before the first message and at each start while undecided (needs `"local"` in `tutor_setting_sources`) |
 | `restarts` | false | the student may `/exit`; they are then at their terminal, where `claude` (a stand-in) starts Claude Code again and `/resume` reopens a conversation |
 | `world` | `""` | the assignment's world module (`pilot/world.py` documents it), relative to the assignment directory |
+| `tutor_sandbox` | false | Claude Code's own sandbox for the tutor's commands (macOS Seatbelt), set through the SDK's settings option, never in the repository: no command may read any home folder or another run; this run's workspace, home and settings folders and the shared caches stay readable and writable; network and local servers stay open; nothing is auto-approved, so permission prompts are unchanged. git commands run outside it (the sandbox never lets a command write `.git/config`, which `git remote` needs); reads outside the run still fail for them. The Read, Edit and Write tools get the same limits as deny rules. A refused read shows as "Operation not permitted" or "denied by sandbox". Needs `run_home` |
+| `tell_date` | false | tell the student today's real date, so a sheet's story date does not contradict the tutor's clock |
 | `[settings]`, `[scenarios.<name>]` | none | per-run settings with their defaults, and named presets of them; chosen with `--scenario`, recorded in `run.json`, given to the world |
 
 The smallest `pilot.toml` is `template = "<path>"`; a relative path is taken from the assignment directory, as

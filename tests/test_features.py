@@ -164,3 +164,33 @@ def test_session_instructions(tmp_path):
     rendered = json.loads(text)["rendered"][0]["content"]
     assert "Contents of /w/r/repo/CLAUDE.md" in rendered and "someone" not in rendered
     assert rendered.startswith("<system-reminder>") and rendered.endswith("</system-reminder>")
+
+
+def test_sandbox_settings(tmp_path, monkeypatch):
+    """The tutor's sandbox: every other home folder and every other run is denied; this run's folders and the
+    shared caches are allowed; nothing is auto-approved and commands cannot leave the sandbox."""
+    homes = tmp_path / "Users"
+    for h in ("someone", "other", "Shared"):
+        (homes / h).mkdir(parents=True)
+    monkeypatch.setattr(run.Path, "home", classmethod(lambda cls: homes / "someone"))
+    wd = homes / "Shared" / "hw-work"
+    for d in ("me-1", "older-1", ".home/me-1", ".home/older-1", ".cache"):
+        (wd / d).mkdir(parents=True)
+    cfg = SimpleNamespace(work_dir=wd)
+    got = run.sandbox_settings(cfg, {"run_id": "me-1", "workspace": wd / "me-1"}, {"allowUnixSockets": ["/x.sock"]})
+    sb = got["sandbox"]
+    assert sb["enabled"] and sb["autoAllowBashIfSandboxed"] is False and sb["allowUnsandboxedCommands"] is False
+    assert sb["excludedCommands"] == ["git:*"]
+    assert sb["filesystem"]["denyRead"] == [str(homes), str(wd)]
+    assert sb["filesystem"]["allowRead"] == [str(wd / "me-1"), str(wd / ".home" / "me-1"), str(wd / ".cache")]
+    assert sb["network"]["allowUnixSockets"] == ["/x.sock"] and sb["network"]["allowLocalBinding"]
+    deny = got["permissions"]["deny"]
+    for p in (homes / "someone", homes / "other", wd / "older-1", wd / ".home" / "older-1"):
+        assert f"Read(/{p}/**)" in deny and f"Edit(/{p}/**)" in deny, p
+    assert not any("me-1" in r or r.endswith("Shared/**)") for r in deny)
+
+
+def test_tell_date_and_sandbox_needs_home(tmp_path):
+    assert "{date}" in run.TODAY
+    with pytest.raises(run.ConfigError, match="run_home"):
+        run.load_config(_assignment(tmp_path, "tutor_sandbox = true\n"))
