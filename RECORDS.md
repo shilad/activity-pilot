@@ -37,6 +37,13 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
  "session_ids": {"tutor": null, "student": null},
  "upstream": {"url": "", "local": null},          (set when the config key upstream_url is non-empty: the URL the template's setup types is rewritten to a local bare clone)
  "error": null,
+ "scenario": {"names": ["uv-missing"], "settings": {"uv": "missing", "...": "..."}},
+ "home": "/abs/work_dir/.home/<run-id>/home" | null,
+ "tutor_sessions": ["uuid", "..."],                (every tutor session id, in order; a resumed one appears once)
+ "restarts": [{"exchange": 4, "type": "exit|start|session|switch", "session": "uuid", "cwd": "...", "mode": "new|continue|picker|resume:<id>", "resumed": "uuid|null"}],
+ "approvals": [{"exchange": 1, "type": "approval", "server": "name", "choice": "yes|yes_all|no", "forced": false}],
+ "effort": {"tutor": {"asked": "low", "seen": ["low"]}, "student": {...}},   (seen: perTurnEffort in the session files)
+ "world": {...},                                   (the world module's facts(), when it has one)
  "config": { ...the resolved config, every key, paths as strings... }}
 ```
 `ended_by` is one of: `finished`, `left`, `max_turns`, `budget`, `timeout`, `error`, `student_silent`,
@@ -89,6 +96,13 @@ turn is written first, then the tutor's.
 - Slot shapes read by `facts.slots`: `**Label:** value`, `**Question?** value`, `**Label** (note): value`, a label
   with its answer on the lines below, and a bold label wrapped onto the next line.
 - `stop` is null except on the last line, where it equals `ended_by`.
+- `kind` (student lines, absent for a message to Claude): `approval` (answered Claude Code's start-up question),
+  `terminal` (at the terminal while Claude Code was closed), `picker` (picked a conversation to resume), `side` (a
+  world's side turn while the tutor worked, with `label`; it is written before the tutor turn it happened in).
+- `event` (when something happened): `{"type": "exit"}`, `{"type": "start", "cwd", "args", "mode"}`,
+  `{"type": "approval", "server", "choice", "forced"}`, `{"type": "resume_pick", "session", "offered"}`.
+- `init` (a tutor session's first turn only): `{"mcp_servers": [...], "tools": n, "mcp_tools": {server: n}}` from
+  the CLI's init message: which servers were connected and how many of their tools the tutor had.
 
 ## facts.json (computed only from turns.jsonl, run.json, gate.txt and the repo; never from memory)
 
@@ -113,7 +127,11 @@ student_wrote_tutor_side: {count, exchanges: [...]},
 truncated_lines: n (turns.jsonl lines that did not parse); commits[].exchange is added; ended_by falls back to the last
 line's stop, then to "crashed" when run.json says running and the recorded pid is not alive,
 models: {tutor: "...", student: "..."}, sdk_version, claude_version,
-note: "cost measured with a warm prompt cache; a real student pausing minutes between messages may pay more"
+note: "cost measured with a warm prompt cache; a real student pausing minutes between messages may pay more",
+scenario (from run.json), restarts: {exits: [exchange], starts: [...], sessions: [...], count}, approvals: [...],
+side_turns: [{exchange, label, seconds}], terminal_turns: [exchange],
+tutor_sessions: [{exchange, session_id, mcp_servers, mcp_tools}]   (from each session's first init)
+Words, drift, silence and fabrication count student messages only (no kind).
 ```
 
 ## transcript.md
@@ -153,6 +171,9 @@ def build(cfg: Config) -> Path                                            # runs
 async def read(run_dir: Path, cfg: Config) -> Path                        # scorecard.md (+ scorecard.json)
 # pilot/cli.py
 def main(argv: list[str] | None = None) -> int
+# pilot/terminal.py (Claude Code's screens acted out), pilot/world.py (scenarios, Context, load_world),
+# pilot/github.py (local GitHub), pilot/scripted.py (ScriptedStudent): each module's docstring is its interface.
+def run_one(cfg, persona, *, repo=None, turns=None, scenario=None, student=None, tutor=None) -> Path
 ```
 
 Constants, each defined once with a comment: `WINDOW_USD = 20.0`, `MINUTES_PER_EXCHANGE = (2, 4)`,

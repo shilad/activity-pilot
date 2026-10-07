@@ -26,8 +26,10 @@ Runs use your Claude subscription and count against its included usage; overflow
 extra usage is on for the account.
 
 - **Laptop:** log in to `claude` as usual; pilot links each run's config directories to your credentials file
-  when there is one. On macOS the login is in the Keychain, which a per-run config directory cannot see, so use
-  the token. TODO: confirm with the probe on a Mac.
+  when there is one. On macOS the login is in the Keychain under a name tied to the config directory, so a
+  per-run config directory is not logged in (confirmed on a Mac, Oct 2026): use the token. Save it in a file
+  only you can read and name that file in `oauth_token_file` (for example `~/.config/activity-pilot/token`);
+  pilot reads it into `CLAUDE_CODE_OAUTH_TOKEN` and redacts it from every record.
 - **Scripts and containers:** `claude setup-token` prints a token that authenticates with your subscription.
   Export it as `CLAUDE_CODE_OAUTH_TOKEN`, which `env_keep` passes through. Last resort: `shared_config = true`.
 - **API keys are refused:** `pilot run` will not start while `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
@@ -41,7 +43,7 @@ inside a Claude Code session does not reuse it. In a Claude Code cloud container
 
 | Command | What it does |
 |---|---|
-| `pilot run <assignment-dir> <persona> [--repo PATH] [--turns N]` | One run of `personas/<persona>.md` on a fresh copy of the template, or on the repo at PATH; at most N exchanges (default `max_turns`) |
+| `pilot run <assignment-dir> <persona> [--repo PATH] [--turns N] [--scenario S ...]` | One run of `personas/<persona>.md` on a fresh copy of the template, or on the repo at PATH; at most N exchanges (default `max_turns`); each `--scenario` is a preset name from `[scenarios]` or one `key=value` setting |
 | `pilot read <assignment-dir> <run-id>` | One reader call over a finished run; writes `scorecard.md` and `scorecard.json` |
 | `pilot report <assignment-dir>` | Recomputes facts for every run and prints one Markdown table, plus agreement over filled calibration sheets |
 | `pilot view <assignment-dir>` | Writes `runs/viewer.html`, one self-contained page over every run |
@@ -76,7 +78,20 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | `student_bash` | true | whether the student session has Bash |
 | `shared_config` | false | auth fallback: both sessions use the host `~/.claude`; trust written there by rename and recorded |
 | `env_keep` | `["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"]` | `CLAUDE*` and `ANTHROPIC_*` variables passed through to the actors; everything else in those families is stripped |
-| `upstream_url` | `""` | when the template's setup adds an upstream remote by URL, that URL is rewritten to a local bare clone so fetches stay offline |
+| `upstream_url` | `""` | when the template's setup adds an upstream remote by URL, that URL is rewritten to a local bare clone so fetches stay offline (`git remote -v` then shows the local path; `pilot/github.py` keeps GitHub URLs instead) |
+| `oauth_token_file` | `""` | a file holding a `claude setup-token` token, read into `CLAUDE_CODE_OAUTH_TOKEN`; the token is redacted from every record |
+| `repo_name` | `""` | the student's copy is `<work_dir>/<run-id>/<repo_name>`; empty means the template folder's name |
+| `finish_pattern` | `""` | a regular expression a finish line must match in full (beside `finish_string`); in the tutor's own text a `**bold**` span may carry it |
+| `slot_heading` | `""` | a regular expression for a heading that is a slot (group 1 is its label), e.g. `^### (.+)$`; its answer is the first paragraph below, blank when empty, the marker, or the marker and a `(note)` |
+| `tutor_effort`, `student_effort`, `reader_effort` | `""` | the CLI's `--effort` (low, medium, high, xhigh, max); `run.json` `effort.seen` lists the levels the CLI wrote in each session file |
+| `env_drop` | `[]` | host variables never passed to the actors, by name or `PREFIX*` (e.g. `UV_*` so a host package mirror does not leak in) |
+| `tutor_setting_sources` | `["project"]` | the tutor's setting sources; add `"local"` for `.claude/settings.local.json`, where the CLI keeps server approvals and remembered permissions |
+| `run_home` | false | each run's own home folder for both actors (`<work_dir>/.home/<run-id>/home`, with `Downloads/`, Claude Code in `~/.local/bin` as its installer puts it, `UV_CACHE_DIR` shared under `<work_dir>/.cache/uv`) |
+| `run_path` | `[]` | the folders after `~/.local/bin` on the actors' PATH instead of the host's PATH |
+| `approve_servers` | `[]` | `.mcp.json` servers whose start-up question the student answers before the first message and at each start while undecided (needs `"local"` in `tutor_setting_sources`) |
+| `restarts` | false | the student may `/exit`; they are then at their terminal, where `claude` (a stand-in) starts Claude Code again and `/resume` reopens a conversation |
+| `world` | `""` | the assignment's world module (`pilot/world.py` documents it), relative to the assignment directory |
+| `[settings]`, `[scenarios.<name>]` | none | per-run settings with their defaults, and named presets of them; chosen with `--scenario`, recorded in `run.json`, given to the world |
 
 The smallest `pilot.toml` is `template = "<path>"`; a relative path is taken from the assignment directory, as
 in `tests/toy/pilot.toml`. The template may be a subdirectory of a larger repo, but it must be committed: only
@@ -142,6 +157,32 @@ of people and between each person and the reader.
 **Cost** is measured with a warm prompt cache, because the simulated student answers in seconds; a real student
 taking minutes between messages may pay more. Windows are tutor USD / 20 ($20 per five-hour window, a rule of
 thumb); the hours band is tutor minutes plus 2 or 4 minutes per exchange plus `fixed_minutes`.
+
+## Restarts, the start-up question, and the world
+
+With `restarts`, a student message whose first line is `/exit` (or `/quit`) closes the tutor's CLI. The student's
+next turns are at their terminal: their Bash, with a `claude` stand-in first on PATH. `claude mcp ...` (and
+`--version`, `--help`) runs the real CLI with the tutor's settings folder, so `claude mcp reset-project-choices` and
+`claude mcp get <server>` act on the tutor's state; a bare `claude` (also `cd <path> && claude`, `claude --resume`,
+`claude -c`) starts Claude Code again with the PATH that terminal had. The first thing typed then picks the
+conversation: `/resume` shows a picker of the earlier conversations started in that folder and reopens the one
+picked (the SDK's resume); anything else starts a new one. A resumed CLI starts its MCP servers again.
+
+With `approve_servers`, the student sees Claude Code's question for a new project server (CLI 2.1.281's wording;
+the third option, "Continue without using this MCP server", is highlighted, so Enter declines) and the answer is
+written to `.claude/settings.local.json` as the CLI writes it. A headless CLI connects an undecided server without
+asking and honours a "no" only when it reads local settings. A scenario setting `approve` set to `yes` or
+`decline` overrides the answer on the first start.
+
+A world module (`world = "..."`) adds what the template's tools expect around them: tutor environment (a `BROWSER`
+program, PATH entries), tools for the student (served in-process as the `laptop` MCP server), a paragraph in the
+student's frame, student side turns while the tutor works, and notices shown before the student's next prompt.
+`pilot/scripted.py` is a student that follows a script instead of a model, for probes and tests
+(`run_one(..., student=...)`); `pilot/github.py` serves `https://github.com/<owner>/<repo>` from local bare
+repositories through a git remote helper, so remotes keep their GitHub URLs.
+
+Student turns that are not messages to Claude carry a `kind` (`approval`, `terminal`, `picker`, `side`); facts
+count only messages for words, drift and silence.
 
 ## Student behavior
 
