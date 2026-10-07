@@ -181,7 +181,10 @@ def test_from_run_copies_and_rewrites(tmp_path):
     old_a = Path(old["config_dirs"]["tutor"])
     session_dir = old_a / "projects" / run.munged(old_repo)
     session_dir.mkdir(parents=True)
-    (session_dir / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(old_repo)}) + "\n")
+    (session_dir / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(old_repo)}) + "\n" + json.dumps(
+        {"type": "attachment", "attachment": {"type": "instructions", "files": [
+            {"path": str(old_repo / "CLAUDE.md"), "type": "Project", "content": "the template's rules"},
+            {"path": "/elsewhere/.claude/CLAUDE.md", "type": "Project", "content": "someone's global rules"}]}}) + "\n")
     second = run.run_one(cfg, "jordan", from_run=old_ws.name, tutor=FakeTutor, student=lambda env, tools, cwd:
                          ScriptedStudent(lambda p, st: [("say", "bye\n(leaves)")], env=env, tools=tools, cwd=cwd))
     new = json.loads((second / "run.json").read_text())
@@ -189,12 +192,17 @@ def test_from_run_copies_and_rewrites(tmp_path):
     assert new["from_run"]["run"] == old_ws.name and new_repo != old_repo and new_repo.is_dir()
     assert str(new_repo) in json.loads((new_a / ".claude.json").read_text())["projects"]
     moved = new_a / "projects" / run.munged(new_repo) / "s1.jsonl"
-    assert json.loads(moved.read_text())["cwd"] == str(new_repo)
+    first_line, att = [json.loads(line) for line in moved.read_text().splitlines()]
+    assert first_line["cwd"] == str(new_repo) and "global rules" not in moved.read_text()
+    assert [f["path"] for f in att["attachment"]["files"]] == [str(new_repo / "CLAUDE.md")]
+    assert new["from_run"]["scrubbed"] == ["/elsewhere/.claude/CLAUDE.md"]
+    for private in (Path(new["workspace"]), Path(new["home"]).parent):
+        assert private.stat().st_mode & 0o777 == 0o700, private
     assert terminal.server_choice(new_repo, "colab") == "yes"  # the approval carried over: no question this time
     assert not any(t.get("kind") == "approval" for t in facts.load_turns(second))
     claude = Path(new["home"]) / ".local" / "bin" / "claude"
     assert str(claude.resolve()).startswith(new["home"])  # points into the new home, not the old one
-    assert json.loads((session_dir / "s1.jsonl").read_text())["cwd"] == str(old_repo)  # the old run is untouched
+    assert "global rules" in (session_dir / "s1.jsonl").read_text()  # the old run is untouched
     for path in Path(new["workspace"]).rglob("*"):
         if path.is_file() and "objects" not in path.parts and path.stat().st_size < run.LINK_BYTES:
             try:

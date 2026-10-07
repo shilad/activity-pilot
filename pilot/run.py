@@ -85,6 +85,24 @@ the work. To stop, write a last message saying why, then put (leaves) alone on i
 after it."""
 
 
+# Outside the home folder: Claude Code reads instructions from every folder above the repository, and a home folder
+# usually holds ~/.claude/CLAUDE.md (a person's global instructions), ~/.claude/agents and ~/.claude/skills.
+DEFAULT_WORK_DIR = "/Users/Shared/hw-work" if sys.platform == "darwin" else "/var/tmp/hw-work"
+# What CLI 2.1.281 loads from a folder ABOVE the project (checked with canary files): instruction files, rules,
+# agents, skills, commands and .mcp.json servers. Settings files in those folders are not read.
+ANCESTOR_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".mcp.json", ".claude/CLAUDE.md", ".claude/rules", ".claude/agents",
+                  ".claude/skills", ".claude/commands", ".claude/output-styles")
+
+
+def ancestor_instructions(repo: Path) -> list[str]:
+    """Files above the repository that Claude Code would load into the tutor's session, from the repository's parent
+    up to /. The repository's own files are the template's, and they belong."""
+    found = []
+    for folder in Path(repo).resolve().parents:
+        found += [str(folder / f) for f in ANCESTOR_FILES if (folder / f).exists()]
+    return found
+
+
 class ConfigError(Exception):
     """pilot.toml, the template, the persona or the environment cannot be used; nothing was started."""
 
@@ -94,7 +112,7 @@ class Config:
     assignment_dir: Path
     runs_dir: Path
     template: Path
-    work_dir: Path = Path("~/hw-work")
+    work_dir: Path = Path(DEFAULT_WORK_DIR)
     setup: str = ""
     gate: str = "uv run python run_all.py"
     finish_string: str = "YOU ARE FINISHED!"
@@ -177,6 +195,9 @@ def load_config(assignment_dir) -> Config:
     wd, tpl = vals["work_dir"], vals["template"]
     if bad := [w for w in LEAK_WORDS if w in str(wd).lower()]:
         raise ConfigError(f"work_dir {wd} contains {', '.join(bad)}, and the tutor can see that path")
+    if found := ancestor_instructions(wd / "run" / "repo"):
+        raise ConfigError(f"work_dir {wd} is below Claude Code files that the tutor would load as its own instructions "
+                          f"({', '.join(found)}); choose a work_dir outside them, e.g. {DEFAULT_WORK_DIR}")
     if wd == adir or adir in wd.parents:
         raise ConfigError(f"work_dir {wd} is inside the assignment directory, where the tutor could find it")
     missing = [n for n in ("CLAUDE.md", ".claude/settings.json", vals["writeup"]) if not (tpl / n).is_file()]
@@ -336,6 +357,7 @@ def _copy_run(old_ws: Path, old_root: Path, new_ws: Path, new_root: Path) -> lis
                 return os.link(src, dst)
         return shutil.copy2(src, dst)
     pairs = [(old_ws, new_ws)] + [(old_root / sub, new_root / sub) for sub in ("a", "home") if (old_root / sub).is_dir()]
+    scrubbed = []
     for src, dst in pairs:
         shutil.copytree(src, dst, symlinks=True, copy_function=copy)
     swaps = [(str(old_root), str(new_root)), (str(old_ws), str(new_ws))]
@@ -352,13 +374,54 @@ def _copy_run(old_ws: Path, old_root: Path, new_ws: Path, new_root: Path) -> lis
                     text = path.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue
-                if (new := _swap(text, swaps)) != text:
+                original = text
+                if path.suffix == ".jsonl" and '"instructions"' in text:  # a session file of the earlier tutor
+                    text, gone = _scrub_instructions(text, str(old_ws))
+                    scrubbed += gone
+                if (new := _swap(text, swaps)) != original:
                     (tmp := path.with_name(path.name + ".rewrite")).write_text(new, encoding="utf-8")
                     shutil.copymode(path, tmp)
                     os.replace(tmp, path)  # a new file: a hard link back to the old run is never written through
             if (name := _swap(path.name, swaps)) != path.name:
                 path.rename(path.with_name(name))
-    return [str(src) for src, _ in pairs]
+    return {"copied": [str(src) for src, _ in pairs], "scrubbed": sorted(set(scrubbed))}
+
+
+def _drop_sections(text: str, paths: list[str]) -> str:
+    """Remove each "Contents of <path> (...):" section from the CLI's rendered instructions."""
+    for path in paths:
+        if (start := text.find(f"Contents of {path} (")) < 0:
+            continue
+        ends = [i for i in (text.find("\nContents of ", start + 1), text.find("</system-reminder>", start)) if i >= 0]
+        end = min(ends) + (1 if ends and text.startswith("\nContents of ", min(ends)) else 0) if ends else len(text)
+        text = text[:start] + text[end:]
+    return text
+
+
+def _scrub_instructions(text: str, inside: str) -> tuple[str, list[str]]:
+    """Empty the instruction files that an earlier tutor session loaded from outside its repository (a folder above
+    it), so a resumed conversation does not carry them. The line stays (other lines point to it); its files go."""
+    out, gone = [], []
+    for line in text.splitlines(keepends=True):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            out.append(line)
+            continue
+        att = entry.get("attachment") if isinstance(entry, dict) else None
+        if isinstance(att, dict) and att.get("type") == "instructions":
+            files = att.get("files") or []
+            keep = [f for f in files if str(f.get("path", "")).startswith(inside + "/")]
+            if len(keep) != len(files):
+                drop = [str(f.get("path")) for f in files if f not in keep]
+                gone += drop
+                att["files"] = keep
+                for block in entry.get("rendered") or []:  # the text the CLI built from them, kept for a resume
+                    if isinstance(block, dict) and isinstance(block.get("content"), str):
+                        block["content"] = _drop_sections(block["content"], drop)
+                line = json.dumps(entry, ensure_ascii=False) + "\n"
+        out.append(line)
+    return "".join(out), gone
 
 
 def _swap(text: str, swaps) -> str:
@@ -371,8 +434,9 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None
     """Claim a run id, export the template into a fresh git repo (or reuse `repo`, or copy the earlier run
     `from_run`: its workspace, the tutor's settings and the home folder), write trust, run setup."""
     tpl, base = cfg.template, f"{persona['first']}-{datetime.now():%m%d-%H%M}"
-    if from_run:
-        old_ws, old_root = cfg.work_dir / from_run, cfg.work_dir / ".home" / from_run
+    if from_run:  # a run id under work_dir, or the path of a workspace elsewhere (an older work_dir)
+        old_ws = Path(from_run).expanduser().resolve() if "/" in from_run else cfg.work_dir / from_run
+        old_root, from_run = old_ws.parent / ".home" / old_ws.name, old_ws.name
         if not (old_ws / (cfg.repo_name or tpl.name) / ".git").exists():
             raise ConfigError(f"--from-run {from_run}: no repository at {old_ws / (cfg.repo_name or tpl.name)}")
         if bad := [w for w in LEAK_WORDS if w in from_run.lower()]:
@@ -384,7 +448,12 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None
             raise ConfigError(f"template {tpl} has no committed files; commit it first")
     elif not ((repo := Path(repo).expanduser().resolve()) / ".git").exists():
         raise ConfigError(f"--repo {repo} is not a git repository")
+    elif found := ancestor_instructions(repo):
+        raise ConfigError(f"--repo {repo} is below Claude Code files the tutor would load: {', '.join(found)}")
     name = cfg.repo_name or tpl.name
+    if found := ancestor_instructions(repo or cfg.work_dir / base / name):
+        raise ConfigError(f"the tutor's repository would be below Claude Code files it would load as its own "
+                          f"instructions: {', '.join(found)}")
     if bad := [w for w in LEAK_WORDS if w in str(repo or cfg.work_dir / base / name).lower()]:
         raise ConfigError(f"the tutor's path would contain {', '.join(bad)}; rename the persona or the template")
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -396,10 +465,16 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None
                 break
     run_dir, ws, upstream = cfg.runs_dir / run_id, cfg.work_dir / run_id, {"url": cfg.upstream_url, "local": None}
     copied = None
+    for private in (cfg.work_dir, cfg.work_dir / ".home"):  # only this user may read runs (work_dir may be shared)
+        private.mkdir(parents=True, exist_ok=True)
+        private.chmod(0o700)
     if from_run:  # the same laptop, a later sitting: the copy keeps the repo, origin, home folder and tutor settings
         copied = _copy_run(old_ws, old_root, ws, cfg.work_dir / ".home" / run_id)
         repo = ws / (cfg.repo_name or tpl.name)
     (ws / "tmp").mkdir(parents=True, exist_ok=True)
+    for private in (ws, cfg.work_dir / ".home" / run_id):
+        private.mkdir(parents=True, exist_ok=True)
+        private.chmod(0o700)
     if repo is None:
         repo = ws / name
         for f in files:  # tracked files only, so untracked notes, logs and local settings never travel
@@ -473,7 +548,7 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None
             "claude_version": _claude_version({"CLAUDE_CONFIG_DIR": str(dirs["tutor"])} if dirs["tutor"] else {}, cli),
             "setup_seconds": round(time.monotonic() - t0, 1), "setup_error": setup_error,
             "home": home, "path": path, "terminal": terminal_dir, "cli": cli, "python": python,
-            "from_run": {"run": from_run, "copied": copied} if from_run else None}
+            "from_run": {"run": from_run, **copied} if from_run else None}
 
 
 def student_denial(name: str, inp: dict, repo: Path, edits, bash: bool, extra=()) -> str | None:
@@ -792,6 +867,21 @@ class _Log:
 
     def close(self) -> None:
         self.f.close()
+
+
+def session_instructions(config_dir, session_ids) -> list[dict]:
+    """The instruction files (CLAUDE.md and the like) the CLI loaded into these sessions, from the `instructions`
+    attachment in each session's transcript: [{"path", "type"}] (Project, Local, User ...), contents left out."""
+    seen = []
+    for sid in filter(None, session_ids):
+        for path in Path(config_dir).glob(f"projects/*/{sid}.jsonl") if config_dir else []:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                with contextlib.suppress(ValueError, AttributeError, TypeError):
+                    att = json.loads(line).get("attachment") or {}
+                    for f in att.get("files") or [] if att.get("type") == "instructions" else []:
+                        if (item := {"path": f.get("path"), "type": f.get("type")}) not in seen:
+                            seen.append(item)
+    return seen
 
 
 def session_efforts(config_dir, session_ids) -> list[str]:
@@ -1250,6 +1340,10 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         failed = ended_by in ("error", "timeout", "killed", None)
         run.update(status="failed" if failed else "finished", ended=_now(), ended_by=ended_by,
                    error=error if failed else None, session_ids={a: sessions.get(a) for a in ("tutor", "student")})
+        run["tutor_instructions"] = loaded = session_instructions(sb["config_dirs"]["tutor"], run["tutor_sessions"])
+        if outside := [f["path"] for f in loaded if not f["path"].startswith(str(repo) + "/")]:
+            run["instructions_outside_repo"] = outside
+            log.write(f"[run] WARNING: the tutor loaded instruction files from outside the repository: {outside}\n")
         run["effort"] = {a: {"asked": getattr(cfg, f"{a}_effort") or None,
                              "seen": session_efforts(sb["config_dirs"][a], run["tutor_sessions"] if a == "tutor"
                                                      else [sessions.get(a)])} for a in ("tutor", "student")}

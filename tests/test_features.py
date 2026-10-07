@@ -128,3 +128,39 @@ def test_session_efforts(tmp_path):
     lines = [{"type": "user"}, {"type": "assistant", "perTurnEffort": "low"}, {"type": "assistant", "perTurnEffort": "low"}]
     (d / "abc.jsonl").write_text("\n".join(map(json.dumps, lines)) + "\nnot json\n")
     assert run.session_efforts(tmp_path, ["abc", None]) == ["low"] and run.session_efforts(tmp_path, ["zzz"]) == []
+
+
+@pytest.mark.parametrize("planted", ["CLAUDE.md", "CLAUDE.local.md", ".mcp.json", ".claude/CLAUDE.md",
+                                     ".claude/agents/x.md", ".claude/skills/x/SKILL.md", ".claude/rules/x.md"])
+def test_instructions_above_the_repo_are_refused(tmp_path, planted):
+    """Claude Code loads these from every folder above the repository (CLI 2.1.281, checked with canary files), so a
+    work_dir below one (a home folder holding someone's global instructions) is refused."""
+    above = tmp_path / "above"
+    (above / planted).parent.mkdir(parents=True, exist_ok=True)
+    (above / planted).write_text("canary")
+    adir = _assignment(tmp_path, "")
+    toml = (adir / "pilot.toml").read_text().replace(str(tmp_path / "work"), str(above / "work"))
+    (adir / "pilot.toml").write_text(toml)
+    with pytest.raises(run.ConfigError, match="Claude Code files"):
+        run.load_config(adir)
+    assert run.ancestor_instructions(above / "work" / "r" / "repo") == [str(above / planted.split("/x")[0])
+                                                                         if "/x" in planted else str(above / planted)]
+
+
+def test_session_instructions(tmp_path):
+    d = tmp_path / "projects" / "-x"
+    d.mkdir(parents=True)
+    lines = [{"type": "attachment", "attachment": {"type": "instructions", "files": [
+        {"path": "/w/r/repo/CLAUDE.md", "type": "Project", "content": "rules"},
+        {"path": "/home/someone/.claude/CLAUDE.md", "type": "Project", "content": "global"}]},
+        "rendered": [{"type": "text", "content": "<system-reminder>\nInstructions.\n\nContents of /home/someone/.claude/"
+                      "CLAUDE.md (project instructions):\n\nglobal\n\nContents of /w/r/repo/CLAUDE.md (project "
+                      "instructions):\n\nrules\n</system-reminder>"}]}]
+    (d / "s.jsonl").write_text("\n".join(map(json.dumps, lines)) + "\n")
+    assert run.session_instructions(tmp_path, ["s"]) == [{"path": "/w/r/repo/CLAUDE.md", "type": "Project"},
+                                                         {"path": "/home/someone/.claude/CLAUDE.md", "type": "Project"}]
+    text, gone = run._scrub_instructions((d / "s.jsonl").read_text(), "/w/r")
+    assert gone == ["/home/someone/.claude/CLAUDE.md"] and "global" not in text and "rules" in text
+    rendered = json.loads(text)["rendered"][0]["content"]
+    assert "Contents of /w/r/repo/CLAUDE.md" in rendered and "someone" not in rendered
+    assert rendered.startswith("<system-reminder>") and rendered.endswith("</system-reminder>")

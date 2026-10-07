@@ -64,7 +64,7 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | Key | Default | Meaning |
 |---|---|---|
 | `template` | required | path to the template checkout; `git archive HEAD` exported, commit recorded |
-| `work_dir` | `~/hw-work` | workspaces and config dirs; refused if it contains sim, pilot, harness or persona |
+| `work_dir` | `/Users/Shared/hw-work` on macOS, `/var/tmp/hw-work` elsewhere | workspaces and config dirs, created readable by you only; refused if it contains sim, pilot, harness or persona, or if any folder above it holds files Claude Code would load as the tutor's own instructions (below) |
 | `setup` | `""` | command run in the repo before exchange 1, timed; empty means the tutor does it |
 | `gate` | `uv run python run_all.py` | run once at the end with a timeout |
 | `finish_string` | `YOU ARE FINISHED!` | matched in untruncated tool results and gate output only |
@@ -157,6 +157,19 @@ of people and between each person and the reader.
 **Cost** is measured with a warm prompt cache, because the simulated student answers in seconds; a real student
 taking minutes between messages may pay more. Windows are tutor USD / 20 ($20 per five-hour window, a rule of
 thumb); the hours band is tutor minutes plus 2 or 4 minutes per exchange plus `fixed_minutes`.
+
+## Keep the tutor's instructions to the template's
+
+Claude Code reads instructions from every folder above the repository, not only from the repository: CLI 2.1.281
+loads `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/rules/`, `.claude/agents/`, `.claude/skills/`,
+`.claude/commands/` and `.mcp.json` from each of them (checked with canary files; settings files above the project
+are not read). A home folder usually holds `~/.claude/CLAUDE.md`, a person's global instructions, so runs under the
+home folder gave the tutor those too. pilot refuses a `work_dir`, a `--repo` or a run whose repository has any of
+these above it (`ancestor_instructions`), and `run.json` lists the instruction files the tutor actually loaded
+(`tutor_instructions`, from the `instructions` entries in its session files), with any outside the repository under
+`instructions_outside_repo`. `--from-run` copies of older runs drop such outside files from the earlier tutor's
+saved conversations (`from_run.scrubbed`); words the tutor wrote about them in its replies stay. The student's
+session reads no settings sources, so it loads none of these.
 
 ## Restarts, the start-up question, and the world
 
