@@ -26,6 +26,8 @@ MAIN_ARGS = ("command", "file_path", "path", "pattern", "url", "skill", "descrip
 TOKEN_KEYS = {"input": ("inputTokens", "input_tokens"), "output": ("outputTokens", "output_tokens"),
               "cache_read": ("cacheReadInputTokens", "cache_read_input_tokens"),
               "cache_creation": ("cacheCreationInputTokens", "cache_creation_input_tokens")}
+KINDS = {"approval": "answers Claude Code's start-up question", "terminal": "at the terminal, Claude Code closed",
+         "picker": "picks a conversation to resume", "side": "while Claude works"}  # student turns that are not messages
 COLUMNS = ["run id", "persona", "ended_by", "exchanges", "wall minutes", "tutor USD", "tutor tokens (input+output)",
            "windows", "prompts", "blanks at end", "gate exit", "hours band", "drift", "fabrications"]
 
@@ -130,7 +132,9 @@ def _arg(tool) -> str:
 def render_turn(turn: dict, *, for_student: bool = False) -> str:
     """One transcript block; `for_student` is the tutor's reply as the student's terminal shows it."""
     tail = STUDENT_TAIL_LINES if for_student else TRANSCRIPT_TAIL_LINES
-    out = [] if for_student else [f"## Exchange {turn.get('exchange')} · {turn.get('actor')}"]
+    kind = KINDS.get(turn.get("kind") or "")
+    out = [] if for_student else [f"## Exchange {turn.get('exchange')} · {turn.get('actor')}" + (f" · {kind}" if kind
+                                                                                               else "")]
     out.append((turn.get("text") or "").strip() or "(no text)")
     if not for_student and (turn.get("narration") or "").strip():  # what the student wrote to itself while editing
         out += ["> (to self) " + line for line in turn["narration"].strip().splitlines() if line.strip()]
@@ -145,6 +149,10 @@ def render_turn(turn: dict, *, for_student: bool = False) -> str:
     out += [f"> [question] {a.get('question')} · answer: {a.get('answer')}" for a in turn.get("asks") or []]
     if for_student:
         return "\n".join(out) + "\n"
+    if event := turn.get("event"):
+        out.append("> [event] " + " ".join(f"{k}={v}" for k, v in event.items()))
+    if (init := turn.get("init")) and turn.get("actor") == "tutor":
+        out.append(f"> [session start] servers {init.get('mcp_servers')} · tools {init.get('mcp_tools')}")
     out += [f"> [hook] {h.get('event')} {'ok' if h.get('ok') else 'not ok'}" for h in turn.get("hooks") or []]
     done = [f"commit {c.get('sha')} {c.get('subject')}" for c in turn.get("commits") or []]
     if turn.get("files_changed"):  # the last commit line carries the files changed, as RECORDS.md shows
@@ -214,7 +222,8 @@ def summarize(run_dir: Path, cfg) -> dict:
     run, turns = _json(run_dir / "run.json") or {}, load_turns(run_dir)
     lines = [line for line in (_text(run_dir / "turns.jsonl") or "").splitlines() if line.strip()]
     by = {a: [t for t in turns if t.get("actor") == a] for a in ("tutor", "student")}
-    tutor, student, last = by["tutor"], by["student"], (turns[-1] if turns else {})
+    tutor, last = by["tutor"], (turns[-1] if turns else {})
+    student = [t for t in by["student"] if (t.get("kind") or "message") == "message"]  # messages to Claude only
     exchanges = max((t.get("exchange") or 0 for t in turns), default=0)
     minutes = {a: round(sum(t.get("seconds") or 0 for t in by[a]) / 60, 2) for a in by}
     cost = {a: _last(by[a], lambda t: (t.get("result") or {}).get("total_cost_usd")) for a in by}
@@ -278,6 +287,18 @@ def summarize(run_dir: Path, cfg) -> dict:
         "student_words_median": median(words) if words else None,
         "student_wrote_tutor_side": {"count": len(fabricated), "exchanges": fabricated},
         "models": {a: _last(by[a], lambda t: t.get("model") or None) or (run.get("models") or {}).get(a) for a in by},
+        "scenario": run.get("scenario"),
+        "restarts": {"exits": [r.get("exchange") for r in run.get("restarts") or [] if r.get("type") == "exit"],
+                     "starts": [r for r in run.get("restarts") or [] if r.get("type") == "start"],
+                     "count": sum(r.get("type") == "start" for r in run.get("restarts") or [])},
+        "approvals": run.get("approvals") or [],
+        "side_turns": [{"exchange": t.get("exchange"), "label": t.get("label"), "seconds": t.get("seconds")}
+                       for t in by["student"] if t.get("kind") == "side"],
+        "terminal_turns": [t.get("exchange") for t in by["student"] if t.get("kind") == "terminal"],
+        "tutor_sessions": [{"exchange": t.get("exchange"), "session_id": t.get("session_id"),
+                            "mcp_servers": t["init"].get("mcp_servers"), "mcp_tools": t["init"].get("mcp_tools")}
+                           for t in tutor if isinstance(t.get("init"), dict) and t.get("session_id") not in
+                           [u.get("session_id") for u in tutor[:tutor.index(t)]]],
         "sdk_version": run.get("sdk_version"), "claude_version": run.get("claude_version"), "note": NOTE}
 
 

@@ -18,6 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     cmd["run"].add_argument("persona", help="the persona sheet's name, personas/<persona>.md")
     cmd["run"].add_argument("--repo", type=Path, help="work in this existing repo instead of a fresh template copy")
     cmd["run"].add_argument("--turns", type=int, help="stop after this many exchanges (default: max_turns)")
+    cmd["run"].add_argument("--scenario", action="append", default=[], metavar="NAME|KEY=VALUE",
+                            help="a preset from pilot.toml [scenarios], or one setting; repeat for more")
     for name in ("read", "calibrate"):
         cmd[name].add_argument("run_id", help="a directory under runs/")
     cmd["calibrate"].add_argument("--initials", required=True, help="the grader's initials, as in sheet-XX.md")
@@ -28,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(a.assignment_dir)
         if a.command == "run":
             from .run import run_one
-            out = run_one(cfg, a.persona, repo=a.repo, turns=a.turns)
+            out = run_one(cfg, a.persona, repo=a.repo, turns=a.turns, scenario=a.scenario)
             print(out)
             return 0 if json.loads((out / "run.json").read_text(encoding="utf-8"))["status"] == "finished" else 1
         if a.command == "report":

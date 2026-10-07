@@ -32,6 +32,19 @@ OTHER_TOOLS = ["Agent", "AskUserQuestion", "BashOutput", "CronCreate", "CronDele
 RULE_FILES = ("CLAUDE.md", "TRANSCRIPT.md")  # the student never opens these, nor anything under .claude/
 NEVER_OPENED, ASK_CLAUDE = "You have never opened that.", "Ask Claude to do it."
 FIRST_PROMPT = "You have just opened Claude Code in your project folder. Type your first message."
+# Screens for the restart feature (restarts = true). The terminal is the student's own Bash; see pilot/terminal.py.
+START_SCREEN = "You typed `claude` in your project folder. Before anything else, Claude Code shows:\n\n{screen}"
+RESTART_SCREEN = "Claude Code is starting and shows:\n\n{screen}"
+TERMINAL_PROMPT = ("Claude Code has closed. You are at your terminal's prompt, in {cwd}. Claude sees nothing you do "
+                   "now. To do something, run it in your terminal (your Bash tool); typing `claude` there starts "
+                   "Claude Code again. Text you write outside a command goes nowhere.")
+TERMINAL_AGAIN = "You are still at your terminal; Claude Code is not running."
+STARTED_PROMPT = "Claude Code is open in {cwd}, in a new conversation. Type your message."
+RESUMED_PROMPT = "Claude Code reopened that conversation; its earlier messages are on your screen again. Type your message."
+PICKER_SCREEN = "Claude Code shows:\n\n{screen}"
+NOTICE = "Meanwhile, on your screen:\n{text}\n\n"
+NO_APPS = "Nothing else is open: no browser, no other apps."  # in prompts/student.md; a world's note replaces it
+UV_CACHE = ".cache/uv"  # under work_dir: one package cache shared by every run with a home folder
 SILENT_PROMPT = "Type your next message to Claude."
 RETRY_PROMPT = "Send only your own next message to Claude, nothing else."
 LEAVES = "(leaves)"
@@ -177,6 +190,9 @@ def load_config(assignment_dir) -> Config:
         raise ConfigError(f"pilot.toml: world module {adir / vals['world']} does not exist")
     if bad := [n for n, t in vals["scenarios"].items() if not isinstance(t, dict) or set(t) - set(vals["settings"])]:
         raise ConfigError(f"pilot.toml: [scenarios.{bad[0]}] must set only keys that [settings] defines")
+    if vals["shared_config"] and vals["run_home"]:
+        raise ConfigError("pilot.toml: shared_config and run_home cannot be combined (the CLI finds its settings "
+                          "through HOME); use oauth_token_file for authentication instead")
     if (vals["approve_servers"] or vals["restarts"]) and "local" not in vals["tutor_setting_sources"]:
         raise ConfigError("pilot.toml: approve_servers and restarts need \"local\" in tutor_setting_sources, since "
                           "the CLI keeps server approvals in .claude/settings.local.json")
@@ -258,14 +274,37 @@ def _git(cwd, *args, check=True) -> str:
     return p.stdout
 
 
-def _claude_version(env: dict) -> str | None:
-    bundled = Path(sdk.__file__).parent / "_bundled" / "claude"  # the SDK runs this binary before any on PATH
+BUNDLED = Path(sdk.__file__).parent / "_bundled" / "claude"  # the SDK runs this binary before any on PATH
+
+
+def _claude_version(env: dict, cli: Path | None = None) -> str | None:
+    cli = cli or (BUNDLED if BUNDLED.exists() else Path(shutil.which("claude") or "claude"))
     try:
-        out = subprocess.run([str(bundled) if bundled.exists() else shutil.which("claude") or "claude", "--version"],
-                             capture_output=True, text=True, timeout=60, env={**os.environ, **env}).stdout.split()
+        out = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=60,
+                             env={**os.environ, **env}).stdout.split()
     except (OSError, subprocess.SubprocessError):
         return None
     return out[0] if out else None
+
+
+def _install_claude(home: Path, version: str) -> Path:
+    """The bundled CLI placed as its native installer would place it: ~/.local/share/claude/versions/<version>,
+    linked from ~/.local/bin/claude. A hard link (or a copy) rather than a symlink, so no path the tutor can read
+    leads back to the library. Returns the binary, which also runs the sessions (cli_path)."""
+    dst = home / ".local" / "share" / "claude" / "versions" / (version or "current")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(BUNDLED, dst)
+    except OSError:
+        shutil.copy2(BUNDLED, dst)
+    (home / ".local" / "bin" / "claude").symlink_to(dst)
+    return dst
+
+
+def host_path() -> list[str]:
+    """The host's PATH without the library's own virtual environment."""
+    venv = str(Path(sys.prefix).resolve())
+    return [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and not p.startswith(venv)]
 
 
 def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
@@ -326,6 +365,22 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
             _write_json(d / ".claude.json", {"hasCompletedOnboarding": True, "projects": {str(repo): trust}})
             if creds.exists():
                 (d / ".credentials.json").symlink_to(creds)
+    home, path, terminal_dir, cli = None, None, None, None
+    version = _claude_version({})
+    if cfg.run_home:  # the actors' own home folder: Downloads/, and Claude Code installed the native way
+        home = cfg.work_dir / ".home" / run_id / "home"
+        for d in ("Downloads", ".local/bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        cli = _install_claude(home, version)
+    if cfg.run_home or cfg.run_path:
+        path = ([str(home / ".local" / "bin")] if home else []) + (list(cfg.run_path) or host_path())
+    python = shutil.which("python3", path=os.pathsep.join(path or host_path())) or "/usr/bin/python3"
+    if cfg.restarts:  # the `claude` the student's terminal runs (pilot/terminal.py)
+        terminal_dir = cfg.work_dir / ".home" / run_id / "terminal"
+        from . import terminal
+        terminal.write_stand_in(terminal_dir, python=python, config_dir=str(dirs["tutor"] or ""),
+                                claude=str(home / ".local" / "bin" / "claude") if home else str(BUNDLED),
+                                version=version or "")
     t0, setup_error = time.monotonic(), None
     if cfg.setup:
         try:
@@ -338,12 +393,16 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
         setup_error = f"setup exited {code}: {out[-500:]}" if code != 0 else None
     return {"run_id": run_id, "run_dir": run_dir, "workspace": ws, "repo": repo, "origin": origin,
             "upstream": upstream, "config_dirs": dirs, "template_commit": _git(tpl, "rev-parse", "HEAD").strip(),
-            "claude_version": _claude_version({"CLAUDE_CONFIG_DIR": str(dirs["tutor"])} if dirs["tutor"] else {}),
-            "setup_seconds": round(time.monotonic() - t0, 1), "setup_error": setup_error}
+            "claude_version": _claude_version({"CLAUDE_CONFIG_DIR": str(dirs["tutor"])} if dirs["tutor"] else {}, cli),
+            "setup_seconds": round(time.monotonic() - t0, 1), "setup_error": setup_error,
+            "home": home, "path": path, "terminal": terminal_dir, "cli": cli, "python": python}
 
 
-def student_denial(name: str, inp: dict, repo: Path, edits, bash: bool) -> str | None:
-    """The student's refusal for a tool call, or None when it is allowed. Paths are judged by their field only."""
+def student_denial(name: str, inp: dict, repo: Path, edits, bash: bool, extra=()) -> str | None:
+    """The student's refusal for a tool call, or None when it is allowed. Paths are judged by their field only.
+    `extra` names further tools the student may use (the world's, served as mcp__laptop__<name>)."""
+    if name in extra:
+        return None
     if name == "Bash" or name not in STUDENT_TOOLS:
         return None if name == "Bash" and bash else ASK_CLAUDE
     raw = str(inp.get("file_path") or inp.get("path") or ("." if name in ("Glob", "Grep") else ""))
@@ -364,8 +423,10 @@ def _summary(inp) -> str:
 
 def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
     """(tutor can_use_tool, student can_use_tool, student PreToolUse hook). `state` holds the turns in progress."""
+    state.setdefault("student_lock", asyncio.Lock())
+
     def deny(name, inp):
-        if msg := student_denial(name, inp or {}, repo, persona["edits"], cfg.student_bash):
+        if msg := student_denial(name, inp or {}, repo, persona["edits"], cfg.student_bash, state.get("extra", ())):
             state["student_turn"]["prompts"].append({"tool": name, "summary": _summary(inp), "decision": "deny",
                                                      "reason": msg})
         return msg
@@ -390,8 +451,9 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
                                                          for o in q.get("options") or [] if isinstance(o, dict)]
             shown += ["  (you may choose more than one; separate them with commas)"] if q.get("multiSelect") else []
         shown += ["", "Type an option's label or your own answer."]
-        side = state["student_turn"] = _new_turn(turn["exchange"], "student")
-        await ask(state["student"], "\n".join(shown), side, cfg.turn_timeout_s, split=True)
+        async with state["student_lock"]:  # one student turn at a time (a world side turn may be running)
+            side = state["student_turn"] = _new_turn(turn["exchange"], "student")
+            await ask(state["student"], "\n".join(shown), side, cfg.turn_timeout_s, split=True)
         _cost(state["cost"], "student", side)
         state["left"] = state["left"] or any(line.strip() == LEAVES for line in side["text"].splitlines())
         said = "\n".join(r.strip() for r in side["text"].splitlines() if r.strip() and r.strip() != LEAVES)
@@ -404,22 +466,29 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
     return tutor_tool, student_tool, student_hook
 
 
-def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stderr, hook=None):
-    env = {"CLAUDE_CONFIG_DIR": str(sb["config_dirs"][actor])} if sb["config_dirs"][actor] else {}
-    common = dict(cwd=str(sb["repo"]), permission_mode="default", can_use_tool=can_use_tool,
-                  max_budget_usd=cfg.max_usd, stderr=stderr)
+def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stderr, hook=None, *, env=None,
+            resume=None, cwd=None, servers=None, extra_tools=(), prompt=None):
+    """The SDK options for one actor. `env` is added to the actor's environment; for the tutor, `resume` reopens
+    a session and `cwd` is where Claude Code was started; for the student, `servers` are in-process MCP servers
+    whose tools (`extra_tools`) are allowed, and `prompt` replaces the persona's system prompt."""
+    base = {"CLAUDE_CONFIG_DIR": str(sb["config_dirs"][actor])} if sb["config_dirs"][actor] else {}
+    common = dict(cwd=str(cwd or sb["repo"]), permission_mode="default", can_use_tool=can_use_tool,
+                  max_budget_usd=cfg.max_usd, stderr=stderr, **({"cli_path": str(sb["cli"])} if sb.get("cli") else {}))
     if actor == "tutor":  # Claude Code itself: its real prompt, the template's settings, every prompt to the callback
         return ClaudeAgentOptions(system_prompt={"type": "preset", "preset": "claude_code"},
                                   setting_sources=list(cfg.tutor_setting_sources), include_hook_events=True,
-                                  model=cfg.tutor_model or None, effort=cfg.tutor_effort or None,
-                                  env={**env, "TMPDIR": str(sb["workspace"] / "tmp"), **TUTOR_EXTRA_ENV}, **common)
+                                  model=cfg.tutor_model or None, effort=cfg.tutor_effort or None, resume=resume,
+                                  env={**base, "TMPDIR": str(sb["workspace"] / "tmp"), **TUTOR_EXTRA_ENV,
+                                       **(env or {})}, **common)
     tools = STUDENT_TOOLS + (["Bash"] if cfg.student_bash else [])
     # allowed_tools approves these before can_use_tool is consulted, and reads inside the repo never prompt, so the
     # path policy runs in a PreToolUse hook, which the CLI calls before any permission rule.
-    return ClaudeAgentOptions(system_prompt=persona["prompt"], setting_sources=[], allowed_tools=tools,
+    return ClaudeAgentOptions(system_prompt=prompt or persona["prompt"], setting_sources=[],
+                              allowed_tools=tools + list(extra_tools), mcp_servers=servers or {},
                               disallowed_tools=[t for t in OTHER_TOOLS + ["Bash"] if t not in tools],
                               hooks={"PreToolUse": [HookMatcher(hooks=[hook])]}, max_turns=STUDENT_MAX_TURNS,
-                              model=cfg.student_model or None, effort=cfg.student_effort or None, env=env, **common)
+                              model=cfg.student_model or None, effort=cfg.student_effort or None,
+                              env={**base, **(env or {})}, **common)
 
 
 def _now() -> str:
@@ -450,6 +519,10 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
         elif isinstance(msg, SystemMessage) and msg.subtype == "init":
             turn["session_id"] = msg.data.get("session_id") or turn["session_id"]
             turn["model"] = turn["model"] or msg.data.get("model")
+            tools = [t for t in msg.data.get("tools") or [] if isinstance(t, str)]
+            turn["init"] = {"mcp_servers": msg.data.get("mcp_servers"), "tools": len(tools),
+                            "mcp_tools": {s: sum(t.startswith(f"mcp__{s}__") for t in tools)
+                                          for s in {t.split("__")[1] for t in tools if t.startswith("mcp__")}}}
         elif isinstance(msg, AssistantMessage):
             turn["model"], turn["session_id"] = msg.model or turn["model"], msg.session_id or turn["session_id"]
             for b in msg.content:
@@ -620,25 +693,26 @@ def _cost(cost: dict, actor: str, turn: dict) -> None:
         cost[actor] = turn["result"]["total_cost_usd"]
 
 
-def _stop(turn: dict, status: str, cost: dict, cfg: Config) -> str | None:
+def _stop(turn: dict, status: str, cost: dict, cfg: Config, silent_ok: bool = False) -> str | None:
     sub, student, lines = (turn["result"] or {}).get("subtype"), turn["actor"] == "student", turn["text"].splitlines()
     for hit, why in ((status == "timeout", "timeout"), (sub == "error_max_budget_usd", "budget"),
                      (student and sub == "error_max_turns", "student_loop"), (status == "error", "error"),
                      (turn["finish_seen"], "finished"), (student and LEAVES in map(str.strip, lines), "left"),
-                     (student and not turn["text"].strip(), "student_silent"),
+                     (student and not silent_ok and not turn["text"].strip(), "student_silent"),
                      (cost["tutor"] + cost["student"] >= cfg.max_usd, "budget")):
         if hit:
             return why
     return None
 
 
-def _gate(cfg: Config, repo: Path, run_dir: Path) -> None:
-    """Run the end-of-run check and write gate.txt; an empty gate writes nothing."""
+def _gate(cfg: Config, repo: Path, run_dir: Path, env: dict | None = None) -> None:
+    """Run the end-of-run check and write gate.txt; an empty gate writes nothing. With `env` (the tutor's own
+    environment: its home folder, PATH and the world's settings) the check sees the laptop as the tutor did."""
     if not cfg.gate.strip():
         return
     try:
         p = subprocess.run(cfg.gate, shell=True, cwd=repo, timeout=cfg.turn_timeout_s, stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env={**os.environ, **env} if env else None)
         body = f"exit {p.returncode}\n{p.stdout}{p.stderr}"
     except subprocess.TimeoutExpired as e:
         body = "exit timeout\n" + "".join(b.decode(errors="replace") if isinstance(b, bytes) else b or ""
@@ -648,8 +722,15 @@ def _gate(cfg: Config, repo: Path, run_dir: Path) -> None:
     (run_dir / "gate.txt").write_text(redact(body), encoding="utf-8")
 
 
-def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int | None = None) -> Path:
-    """Run one persona against the template and return the run directory. Raises ConfigError before starting."""
+def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int | None = None,
+            scenario: list[str] | None = None) -> Path:
+    """Run one persona against the template and return the run directory. Raises ConfigError before starting.
+    `scenario` lists --scenario picks: `key=value` settings or preset names from pilot.toml."""
+    from .world import ScenarioError, resolve_scenario
+    try:
+        picked = resolve_scenario(cfg.settings, cfg.scenarios, scenario)
+    except ScenarioError as e:
+        raise ConfigError(str(e)) from e
     env, stripped = clean_env(cfg)
     for name in stripped:  # the SDK hands os.environ to both CLIs
         os.environ.pop(name, None)
@@ -657,12 +738,16 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = env["CLAUDE_CODE_OAUTH_TOKEN"]
     who = load_persona(cfg, persona)
     sb = build_sandbox(cfg, who, repo=repo)
+    sb["scenario"] = picked
     asyncio.run(_drive(cfg, who, sb, stripped, turns or cfg.max_turns))
     return sb["run_dir"]
 
 
 async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limit: int) -> None:
-    run_dir, repo = sb["run_dir"], sb["repo"]
+    from . import terminal
+    from .world import Context, call, load_world
+    run_dir, repo, home = sb["run_dir"], sb["repo"], sb.get("home")
+    scenario = sb.get("scenario") or {"names": [], "settings": dict(cfg.settings)}
     log = _Log(run_dir / "run.log")
     (run_dir / "persona.md").write_text(persona["raw"], encoding="utf-8")  # the sheet as this run was given it
     run = {"run_id": sb["run_id"], "status": "running", "assignment_dir": str(cfg.assignment_dir),
@@ -676,47 +761,165 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
            "setup_seconds": sb["setup_seconds"], "session_ids": {"tutor": None, "student": None},
            "upstream": sb["upstream"], "error": None,
            "persona_sha256": hashlib.sha256(persona["raw"].encode()).hexdigest(),
+           "scenario": scenario, "home": str(home) if home else None, "tutor_sessions": [], "restarts": [],
+           "approvals": [],
            "config": {k: str(v) if isinstance(v, Path) else list(v) if isinstance(v, tuple) else v
                       for k, v in asdict(cfg).items()}}
     _write_json(run_dir / "run.json", run)
     _append(run_dir / "transcript.md", f"# {sb['run_id']}\n\n{persona['name']} ({persona['key']}) · template "
             f"{sb['template_commit']} · tutor {cfg.tutor_model or 'default'}, student {cfg.student_model or 'default'}"
-            f" · started {run['started']}\n\n")
-    state = {"tutor_turn": None, "student_turn": None, "left": False, "cost": {"tutor": 0.0, "student": 0.0}}
-    tutor_tool, student_tool, student_hook = callbacks(cfg, persona, repo, state)
-    warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)  # expected: the hook polices instead
-    student = state["student"] = ClaudeSDKClient(options(cfg, sb, persona, "student", student_tool,
-                                                         lambda s: log.write(f"[student] {s}\n"), student_hook))
-    tutor = ClaudeSDKClient(options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n")))
+            f" · started {run['started']}" + (f" · scenario {', '.join(scenario['names'])}" if scenario["names"]
+                                              else "") + "\n\n")
+    state = {"tutor_turn": None, "student_turn": None, "left": False, "cost": {"tutor": 0.0, "student": 0.0},
+             "student_lock": asyncio.Lock(), "notices": [], "exchange": 1, "open_tutor": None}
     ended_by, error, open_turn, prev, tutor_text, sessions = None, sb["setup_error"], None, None, "", {}
     finish = finish_matcher(cfg)
+    tutor, student, world = None, None, None
+    known: dict[str, dict] = {}  # tutor session id -> {"id", "first", "messages", "last", "cwd"}, for the picker
 
-    async def step(exchange: int, actor: str, client: ClaudeSDKClient, prompt: str) -> tuple[dict, str]:
-        """One actor turn: ask, re-ask once if needed, measure the repo, decide whether to stop, record."""
+    async def side_turn(prompt: str, label: str) -> dict:
+        """A student turn while the tutor works (the world's): recorded, never sent to the tutor."""
+        async with state["student_lock"]:
+            turn = state["student_turn"] = {**_new_turn(state["exchange"], "student"), "kind": "side", "label": label}
+            await ask(student, prompt, turn, cfg.turn_timeout_s, split=True)
+        _cost(state["cost"], "student", turn)
+        record_turn(run_dir, turn)
+        return turn
+
+    ctx = Context(cfg=cfg, run_id=sb["run_id"], run_dir=run_dir, workspace=sb["workspace"], repo=repo, home=home,
+                  tutor_config=sb["config_dirs"]["tutor"], settings=scenario["settings"], persona=persona["key"],
+                  log=lambda text: log.write(f"[world] {text}\n"), side_turn=side_turn,
+                  tutor_view=lambda: _render_turn(state["open_tutor"], for_student=True) if state["open_tutor"] else "",
+                  notify=state["notices"].append, tutor_busy=lambda: state["open_tutor"] is not None)
+    if cfg.world and not error:
+        try:
+            world = load_world(cfg.assignment_dir / cfg.world, ctx)
+            await (call(world, "start") or asyncio.sleep(0))
+        except Exception as e:
+            error = f"world module failed to start: {type(e).__name__}: {e}"[:1000]
+    wenv = dict(call(world, "tutor_env", {}) or {})
+    wpath = wenv.pop("PATH", []) or []
+    wpath = [wpath] if isinstance(wpath, str) else list(wpath)
+    base_path = wpath + (sb["path"] if sb.get("path") is not None else host_path() if wpath else [])
+    tutor_env = {**({"HOME": str(home), "UV_CACHE_DIR": str(cfg.work_dir / UV_CACHE), "DISABLE_AUTOUPDATER": "1"}
+                    if home else {}), **wenv, **({"PATH": os.pathsep.join(base_path)} if base_path else {})}
+    term_bin = str(sb["terminal"] / "bin") if sb.get("terminal") else None
+    student_env = {k: v for k, v in tutor_env.items() if k != "PATH"}
+    if base_path or term_bin:  # the student's terminal: the tutor's PATH, with the `claude` stand-in first
+        student_env["PATH"] = os.pathsep.join(([term_bin] if term_bin else []) + (base_path or host_path()))
+    tools = list(call(world, "student_tools", []) or [])
+    servers = {"laptop": sdk.create_sdk_mcp_server(name="laptop", tools=tools)} if tools else {}
+    state["extra"] = extra = tuple(f"mcp__laptop__{t.name}" for t in tools)
+    prompt = persona["prompt"]
+    if note := call(world, "student_note", ""):
+        prompt = prompt.replace(NO_APPS, note.strip()) if NO_APPS in prompt else prompt + "\n\n" + note.strip()
+    tutor_tool, student_tool, student_hook = callbacks(cfg, persona, repo, state)
+    warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)  # expected: the hook polices instead
+    student = state["student"] = ClaudeSDKClient(options(
+        cfg, sb, persona, "student", student_tool, lambda s: log.write(f"[student] {s}\n"), student_hook,
+        env=student_env, servers=servers, extra_tools=extra, prompt=prompt))
+
+    def new_tutor(resume=None, path=None, cwd=None) -> ClaudeSDKClient:
+        state["tutor_fresh"] = True  # the next tutor turn keeps its init details (servers and tools at start)
+        env = {**tutor_env, **({"PATH": path} if path else {})}
+        return ClaudeSDKClient(options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n"),
+                                       env=env, resume=resume, cwd=cwd))
+
+    def with_notices(text: str) -> str:
+        shown = "".join(NOTICE.format(text=n.strip()) for n in state["notices"])
+        state["notices"].clear()
+        return shown + text
+
+    async def step(exchange: int, actor: str, client: ClaudeSDKClient, prompt: str, kind: str = "message",
+                   post=None) -> tuple[dict, str]:
+        """One actor turn: ask, re-ask once if needed, measure the repo, decide whether to stop, record. `kind`
+        marks a student turn that is not a message to Claude (approval, terminal, picker); `post(turn)` runs
+        before the turn is recorded."""
         nonlocal open_turn, prev
         turn = open_turn = state[f"{actor}_turn"] = _new_turn(exchange, actor)
+        state["exchange"] = exchange
+        if kind != "message":
+            turn["kind"] = kind
         student = actor == "student"
-        status, detail = await ask(client, prompt, turn, cfg.turn_timeout_s, finish, split=student)
-        if student:
-            if status == "ok" and turn["result"] and not turn["text"].strip():
-                status, detail = await ask(client, SILENT_PROMPT, turn, cfg.turn_timeout_s, finish,
-                                           split=True)
-            rule = fabrication(turn["text"], tutor_text) if status == "ok" else None
-            turn["fabrication"] = {"fired": bool(rule), "rule": rule, "retried": bool(rule)}
-            if rule:  # re-ask once and use the second reply whatever it is
-                status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, finish,
-                                           split=True)
+        if not student:
+            state["open_tutor"] = turn
+        async with (state["student_lock"] if student else contextlib.nullcontext()):
+            status, detail = await ask(client, prompt, turn, cfg.turn_timeout_s, finish, split=student)
+            if student and kind in ("message", "terminal"):
+                if status == "ok" and turn["result"] and not turn["text"].strip() and not (
+                        kind == "terminal" and turn["tools"]):
+                    status, detail = await ask(client, SILENT_PROMPT if kind == "message" else TERMINAL_AGAIN, turn,
+                                               cfg.turn_timeout_s, finish, split=True)
+                rule = fabrication(turn["text"], tutor_text) if status == "ok" and kind == "message" else None
+                turn["fabrication"] = {"fired": bool(rule), "rule": rule, "retried": bool(rule)}
+                if rule:  # re-ask once and use the second reply whatever it is
+                    status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, finish, split=True)
+        state["open_tutor"] = None
+        if not student and not state.pop("tutor_fresh", False):
+            turn.pop("init", None)  # the CLI repeats it on every turn; only a session's first is kept
         if not student:  # the tutor may say the finish phrase in its own text: a whole line, or a bold span
             turn["finish_seen"] = turn["finish_seen"] or any(map(finish, turn["text"].splitlines()))
         prev, changes = snapshot(repo, prev, cfg)
         turn.update(changes)
         _cost(state["cost"], actor, turn)
         sessions[actor] = turn["session_id"] or sessions.get(actor)
-        turn["stop"] = _stop(turn, status, state["cost"], cfg) or (None if actor == "student" else (
-            "left" if state["left"] else "max_turns" if exchange == limit else None))
+        if post:
+            post(turn)
+        silent_ok = kind != "message"  # an empty answer to a screen is Enter; an empty terminal turn is a pause
+        turn["stop"] = _stop(turn, status, state["cost"], cfg, silent_ok=silent_ok) or (
+            ("max_turns" if exchange == limit and kind == "terminal" else None) if student else
+            "left" if state["left"] else "max_turns" if exchange == limit else None)
         record_turn(run_dir, turn)
         open_turn = None
         return turn, detail
+
+    async def approve(exchange: int, first: bool) -> dict | None:
+        """Claude Code's start-up question for each undecided server in approve_servers. On the first start the
+        scenario setting `approve` (yes or decline) overrides the student's answer; later askings (after
+        `claude mcp reset-project-choices`) take the answer. Returns a turn that stopped the run, if any."""
+        for name in terminal.pending(repo, cfg.approve_servers):
+            forced = {"yes": "yes", "decline": "no"}.get(scenario["settings"].get("approve", "")) if first else None
+            screen = (START_SCREEN if first else RESTART_SCREEN).format(screen=terminal.approval_screen(name))
+
+            def post(turn, name=name, forced=forced):
+                choice = forced or terminal.parse_approval(turn["text"])
+                terminal.apply_choice(repo, name, choice)
+                turn["event"] = event = {"type": "approval", "server": name, "choice": choice,
+                                         "forced": bool(forced)}
+                run["approvals"].append({"exchange": exchange, **event})
+            turn, _ = await step(exchange, "student", student, with_notices(screen), kind="approval", post=post)
+            if turn["stop"]:
+                return turn
+        return None
+
+    async def pick(exchange: int, cwd: str) -> tuple[str | None, dict | None]:
+        """The /resume picker for conversations started in `cwd`; returns (session id or None, stopping turn)."""
+        mine = [s for s in known.values() if s["cwd"] == cwd]
+        screen = PICKER_SCREEN.format(screen=terminal.picker_screen(mine))
+        chosen = []
+
+        def post(turn):
+            chosen.append(terminal.parse_pick(turn["text"], mine))
+            turn["event"] = {"type": "resume_pick", "session": chosen[0], "offered": len(mine)}
+        turn, _ = await step(exchange, "student", student, screen, kind="picker", post=post)
+        return chosen[0], (turn if turn["stop"] else None)
+
+    async def close_tutor(exchange: int) -> None:
+        nonlocal tutor
+        try:
+            await asyncio.wait_for(tutor.disconnect(), 30)
+        except Exception as e:
+            log.write(f"[run] disconnect failed: {type(e).__name__}: {e}\n")
+        tutor = None
+        run["restarts"].append({"exchange": exchange, "type": "exit", "session": sessions.get("tutor")})
+        _write_json(run_dir / "run.json", run)
+
+    def note_session(turn: dict, sent: str, cwd: str) -> None:
+        if sid := turn.get("session_id"):
+            s = known.setdefault(sid, {"id": sid, "first": sent, "messages": 0, "last": 0.0, "cwd": cwd})
+            s.update(messages=s["messages"] + 2, last=time.time())
+            if sid not in run["tutor_sessions"]:
+                run["tutor_sessions"].append(sid)
 
     killed, loop, main = [], asyncio.get_running_loop(), asyncio.current_task()
     with contextlib.suppress(NotImplementedError, RuntimeError):  # SIGTERM cancels the run as Ctrl-C does, so the
@@ -726,14 +929,75 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             ended_by = "error"
             return
         await student.connect()
-        await tutor.connect()
         prev, _ = snapshot(repo, None, cfg)
-        message = FIRST_PROMPT
-        for exchange in range(1, limit + 1):
-            turn, detail = await step(exchange, "student", student, message)
-            if not turn["stop"]:
-                turn, detail = await step(exchange, "tutor", tutor, turn["text"])
-                tutor_text, message = turn["text"], _render_turn(turn, for_student=True)
+        if stopped := await approve(1, first=True):
+            ended_by = stopped["stop"]
+            return
+        tutor, tutor_cwd = new_tutor(), str(repo)
+        await tutor.connect()
+        message, queued, exchange = FIRST_PROMPT, None, 0
+        while True:
+            if queued is None:
+                exchange += 1
+                if exchange > limit:
+                    ended_by = "max_turns"
+                    break
+                kind, started = "message" if tutor else "terminal", {}
+
+                def post(turn, kind=kind):
+                    if kind == "message" and cfg.restarts and terminal.is_exit(turn["text"]):
+                        turn["event"] = {"type": "exit"}
+                    elif kind == "terminal" and (req := terminal.take_start(sb["terminal"])):
+                        turn["event"] = {"type": "start", "cwd": req.get("cwd"), "args": req.get("args") or [],
+                                         "mode": terminal.start_mode(req.get("args") or [])}
+                        started["path"] = req.get("path")
+                    elif kind == "message" and sb.get("terminal") and (req := terminal.take_start(sb["terminal"])):
+                        log.write(f"[run] the student started a second Claude Code in {req.get('cwd')}; ignored\n")
+                turn, detail = await step(exchange, "student", student, with_notices(message), kind=kind, post=post)
+                path = started.get("path")
+                if turn["stop"]:
+                    ended_by, error = turn["stop"], detail or None
+                    break
+                event = turn.get("event") or {}
+                if event.get("type") == "exit":
+                    await close_tutor(exchange)
+                    message = TERMINAL_PROMPT.format(cwd=repo)
+                    continue
+                if kind == "terminal":
+                    if event.get("type") != "start":
+                        message = TERMINAL_AGAIN
+                        continue
+                    cwd, mode, typed = event["cwd"] or str(repo), event["mode"], turn["text"].strip()
+                    if stopped := await approve(exchange, first=False):
+                        ended_by = stopped["stop"]
+                        break
+                    resume = None
+                    mine = [s for s in known.values() if s["cwd"] == cwd]
+                    if mode == "continue":
+                        resume = max(mine, key=lambda s: s["last"])["id"] if mine else None
+                    elif mode.startswith("resume:") and mode[7:] in known:
+                        resume = mode[7:]
+                    elif mode != "new" or terminal.is_resume(typed):
+                        resume, stopped = await pick(exchange, cwd)
+                        typed = ""
+                        if stopped:
+                            ended_by = stopped["stop"]
+                            break
+                    tutor, tutor_cwd = new_tutor(resume=resume, path=path, cwd=cwd), cwd
+                    await tutor.connect()
+                    run["restarts"].append({"exchange": exchange, "type": "start", "cwd": cwd, "resumed": resume,
+                                            "mode": mode})
+                    _write_json(run_dir / "run.json", run)
+                    if typed and not terminal.is_resume(typed):
+                        queued = typed
+                    else:
+                        message = (RESUMED_PROMPT if resume else STARTED_PROMPT).format(cwd=cwd)
+                        continue
+                else:
+                    queued = turn["text"]
+            turn, detail = await step(exchange, "tutor", tutor, queued)
+            note_session(turn, queued, tutor_cwd)
+            queued, tutor_text, message = None, turn["text"], _render_turn(turn, for_student=True)
             if turn["stop"]:
                 ended_by, error = turn["stop"], detail or None
                 break
@@ -752,17 +1016,25 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
     finally:
         with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.remove_signal_handler(signal.SIGTERM)
-        _gate(cfg, repo, run_dir)
+        if world is not None:
+            try:
+                await (call(world, "stop") or asyncio.sleep(0))
+                run["world"] = call(world, "facts", None)
+            except Exception as e:
+                log.write(f"[run] world stop failed: {type(e).__name__}: {e}\n")
+        _gate(cfg, repo, run_dir, env=tutor_env if home or wenv else None)
         for client in (tutor, student):
             try:
-                await asyncio.wait_for(client.disconnect(), 30)
+                if client is not None:
+                    await asyncio.wait_for(client.disconnect(), 30)
             except Exception as e:
                 log.write(f"[run] disconnect failed: {type(e).__name__}: {e}\n")
         failed = ended_by in ("error", "timeout", "killed", None)
         run.update(status="failed" if failed else "finished", ended=_now(), ended_by=ended_by,
                    error=error if failed else None, session_ids={a: sessions.get(a) for a in ("tutor", "student")})
         run["effort"] = {a: {"asked": getattr(cfg, f"{a}_effort") or None,
-                             "seen": session_efforts(sb["config_dirs"][a], [sessions.get(a)])} for a in ("tutor", "student")}
+                             "seen": session_efforts(sb["config_dirs"][a], run["tutor_sessions"] if a == "tutor"
+                                                     else [sessions.get(a)])} for a in ("tutor", "student")}
         _write_json(run_dir / "run.json", run)
         try:
             from . import facts

@@ -124,7 +124,10 @@ def _turn(t: dict) -> str:
     cost = (t.get("result") or {}).get("total_cost_usd")
     if isinstance(cost, (int, float)):
         head.append(f"session total ${cost:.2f}")
-    out = [f"<p><strong>{escape(str(t.get('actor') or 'unknown').capitalize())}</strong> {escape(', '.join(head))}</p>"]
+    kind = {"approval": " (start-up question)", "terminal": " (at the terminal)", "picker": " (resume picker)",
+            "side": " (while Claude works)"}.get(str(t.get("kind") or ""), "")
+    out = [f"<p><strong>{escape(str(t.get('actor') or 'unknown').capitalize() + kind)}</strong> "
+           f"{escape(', '.join(head))}</p>"]
     text = str(t.get("text") or "")
     out.append(f'<div class="t">{escape(text)}</div>' if text.strip() else "<p>No text this turn.</p>")
     if str(t.get("narration") or "").strip():
@@ -146,6 +149,8 @@ def _turn(t: dict) -> str:
     if fab.get("fired"):
         lines.append(f"[student wrote Claude's side, rule {fab.get('rule')}, "
                      f"{'re-asked' if fab.get('retried') else 'not re-asked'}]")
+    if isinstance(t.get("event"), dict):
+        lines.append("[event] " + " ".join(f"{k}={v}" for k, v in t["event"].items()))
     if t.get("stop"):
         lines.append(f"[run stopped] {t['stop']}")
     out += [f"<div><code>{escape(line)}</code></div>" for line in lines]

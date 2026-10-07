@@ -66,7 +66,8 @@ async def read(run_dir: Path, cfg) -> Path:
     config_dir = (run.get("config_dirs") or {}).get("student")
     opts = ClaudeAgentOptions(system_prompt=brief(), setting_sources=[], allowed_tools=[], permission_mode="default",
                               disallowed_tools=OTHER_TOOLS + STUDENT_TOOLS + ["Bash"], max_turns=1,
-                              model=cfg.reader_model or None, max_budget_usd=cfg.max_usd, cwd=str(run_dir),
+                              model=cfg.reader_model or None, effort=getattr(cfg, "reader_effort", "") or None,
+                              max_budget_usd=cfg.max_usd, cwd=str(run_dir),
                               env={"CLAUDE_CONFIG_DIR": config_dir} if config_dir else {})
     text, ids = materials(run_dir, cfg, run)
     total, model, prompt = 0.0, None, text
