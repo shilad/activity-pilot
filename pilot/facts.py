@@ -179,6 +179,15 @@ def _tokens(lines) -> dict | None:
     return {k: sum(int(m.get(a) or m.get(b) or 0) for m in models) for k, (a, b) in TOKEN_KEYS.items()}
 
 
+def _model_costs(lines) -> dict | None:
+    """USD per served model in the actor's last model_usage: the CLI counts its subagents (a grader the tutor
+    launched) in the same session, under their own model."""
+    usage = _last(lines, lambda t: (t.get("result") or {}).get("model_usage") or None)
+    if not isinstance(usage, dict):
+        return None
+    return {m: round(float(u.get("costUSD") or 0), 4) for m, u in usage.items() if isinstance(u, dict)}
+
+
 def _minutes(start, end) -> float | None:
     try:
         return round((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds() / 60, 2)
@@ -261,6 +270,7 @@ def summarize(run_dir: Path, cfg) -> dict:
         "cost_usd": {**cost, "reader": (_json(run_dir / "scorecard.json") or {}).get("cost_usd"),
                      "total_student_side": cost["tutor"]},
         "tokens": {a: _tokens(by[a]) for a in by},
+        "cost_by_model": {a: _model_costs(by[a]) for a in by},  # subagents' models included (e.g. Sonnet graders)
         "windows": None if cost["tutor"] is None else round(cost["tutor"] / WINDOW_USD, 3),
         "hours_band": {f"{m}min": round((minutes["tutor"] + exchanges * m + (cfg.fixed_minutes or 0)) / 60, 2)
                        for m in MINUTES_PER_EXCHANGE},

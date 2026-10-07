@@ -111,6 +111,7 @@ run_id, persona, student_name, status, ended_by, exchanges,
 minutes_wall, minutes_tutor (sum of tutor seconds / 60), minutes_student, setup_seconds,
 cost_usd: {tutor, student, reader (from scorecard.json if present), total_student_side (= tutor)},
 tokens: {tutor: {input, output, cache_read, cache_creation}, student: {...}}   (from the last model_usage per actor, summed over models)
+cost_by_model: {tutor: {model: usd}, student: {...}}   (the last model_usage per actor; the tutor's includes the subagents it launched, e.g. Sonnet graders)
 windows: tutor cost / 20.0                                                    (WINDOW_USD constant, "assuming $20 per five-hour window")
 hours_band: {"2min": h, "4min": h}  = minutes_tutor/60 + exchanges*m/60 + fixed_minutes/60
 prompts: {total, by_tool: {Bash: n, ...}, denied: n}
