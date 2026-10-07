@@ -30,11 +30,21 @@ COLUMNS = ["run id", "persona", "ended_by", "exchanges", "wall minutes", "tutor 
            "windows", "prompts", "blanks at end", "gate exit", "hours band", "drift", "fabrications"]
 
 
-def slots(text: str, marker: str, part_heading: str) -> list[dict]:
+def _blank_heading(value: str, marker: str) -> bool:
+    """A heading slot is blank when its first paragraph is empty, the marker, or the marker and a (note)."""
+    return not value or bool(re.fullmatch(re.escape(marker) + r"\s*(\(.*\))?", value, re.S))
+
+
+def slots(text: str, marker: str, part_heading: str, slot_heading: str = "") -> list[dict]:
     """Every slot in a writeup: a line starting with a bold label. Four shapes are read: `**Label:** value`,
     `**Question?** value`, `**Label** (note): value`, and a label whose answer sits on the lines below it (the
     first paragraph before the next label or heading). A bold label wrapped onto the next line is joined first.
-    A slot is blank when its value is the marker or empty."""
+    A slot is blank when its value is the marker or empty.
+
+    With `slot_heading` (a regular expression whose group 1 is the label, such as `^### (.+)$`), a matching
+    heading is also a slot: its value is the first paragraph below it, and it is blank when that paragraph is
+    empty, the marker, or the marker followed by a bracketed note (`XXXX (add the diagram)`). Bold labels inside
+    a heading slot's answer are part of the answer, not slots."""
     raw, lines, skip = text.splitlines(), [], False
     for i, line in enumerate(raw):
         if skip:  # the continuation line was joined onto the label above; keep the line count
@@ -46,11 +56,27 @@ def slots(text: str, marker: str, part_heading: str) -> list[dict]:
         else:
             lines.append(line)
     part, out, heading = None, [], re.compile(part_heading)
+    slot_rx, inside = re.compile(slot_heading) if slot_heading else None, False
     for idx, line in enumerate(lines):
         if m := heading.match(line):
-            part = int(m.group(1))
+            part, inside = int(m.group(1)), False
             continue
-        if not (m := LABEL.match(line.strip())):
+        if slot_rx and (m := slot_rx.match(line)):
+            below = []
+            for nxt in lines[idx + 1:]:
+                if nxt.lstrip().startswith("#"):
+                    break
+                if nxt.strip():
+                    below.append(nxt.strip())
+                elif below:
+                    break
+            out.append({"label": m.group(1).strip(), "part": part,
+                        "blank": _blank_heading(" ".join(below), marker)})
+            inside = True
+            continue
+        if line.lstrip().startswith("#"):
+            inside = False
+        if inside or not (m := LABEL.match(line.strip())):
             continue
         label, value = m.group(1).strip().rstrip(":").strip(), TRAIL.sub("", m.group(2), count=1).strip()
         if not value:  # the answer sits below the label
@@ -174,7 +200,7 @@ def _parts(turns, run, cfg) -> list[dict] | None:
     text = _text(Path(run["repo"]) / cfg.writeup) if run.get("repo") else None
     if text is None:
         return None
-    found, first = slots(text, cfg.slot_marker, cfg.part_heading), {}
+    found, first = slots(text, cfg.slot_marker, cfg.part_heading, getattr(cfg, "slot_heading", "")), {}
     for t in reversed(turns):  # label -> the earliest exchange that filled it
         first.update(dict.fromkeys((t.get("slots") or {}).get("filled_this_turn") or [], t.get("exchange")))
     mine = {p: [s for s in found if s["part"] == p] for p in dict.fromkeys(s["part"] for s in found) if p is not None}

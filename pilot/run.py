@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio, contextlib, json, os, re, shlex, shutil, signal, socket, subprocess  # noqa: E401
 import hashlib, sys, time, tomllib, warnings  # noqa: E401
-from dataclasses import MISSING, asdict, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,13 +89,49 @@ class Config:
     shared_config: bool = False
     env_keep: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL")
     upstream_url: str = ""
+    oauth_token_file: str = ""  # a file holding a `claude setup-token` token; read into CLAUDE_CODE_OAUTH_TOKEN
+    repo_name: str = ""  # the student's copy is <work_dir>/<run-id>/<repo_name>; empty means the template folder's name
+    finish_pattern: str = ""  # a regular expression a whole finish line must match, beside finish_string
+    slot_heading: str = ""  # a regular expression for a heading that is a writeup slot; group 1 is its label
+    tutor_effort: str = ""  # the CLI's --effort for each actor: low, medium, high, xhigh or max; empty is the default
+    student_effort: str = ""
+    reader_effort: str = ""
+    env_drop: tuple[str, ...] = ()  # host variables never passed to either actor: NAME, or PREFIX* for a family
+    run_home: bool = False  # a home folder per run for both actors (HOME), with Downloads/ and ~/.local/bin/claude
+    run_path: tuple[str, ...] = ()  # the folders after ~/.local/bin on the actors' PATH; empty keeps the host's PATH
+    tutor_setting_sources: tuple[str, ...] = ("project",)  # add "local" to read .claude/settings.local.json
+    approve_servers: tuple[str, ...] = ()  # .mcp.json servers whose start-up question the student answers
+    restarts: bool = False  # the student may /exit Claude Code, use their terminal, and start it again with `claude`
+    world: str = ""  # the assignment's world module (see pilot/world.py), relative to the assignment directory
+    settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
+    scenarios: dict = field(default_factory=dict)  # named presets, [scenarios.<name>] tables of settings
 
 
 def _coerce(key, value, default):
-    kinds = {bool: bool, int: int, float: (int, float), tuple: (list, tuple)}.get(type(default), (str, Path))
+    kinds = {bool: bool, int: int, float: (int, float), tuple: (list, tuple), dict: dict}.get(type(default), (str, Path))
     if not isinstance(value, kinds) or (isinstance(value, bool) and not isinstance(default, bool)):
         raise ConfigError(f"pilot.toml: {key} = {value!r} should be a {type(default).__name__}")
     return tuple(value) if isinstance(default, tuple) else float(value) if isinstance(default, float) else value
+
+
+EFFORTS = ("", "low", "medium", "high", "xhigh", "max")  # the CLI's --effort levels; "" leaves the CLI's default
+MARKS = "*_#`> "  # Markdown marks stripped from both ends of a line before it is compared with the finish rule
+
+
+def finish_matcher(cfg) -> "callable":
+    """A test for one line of text: equal to finish_string, or a full match of finish_pattern, after Markdown marks
+    are stripped from both ends. A bold span (`**...**`) inside a longer line counts when its text matches the
+    pattern, so "Done. **YOU ARE FINISHED WITH PART 0!**" finishes; a plain mention inside a sentence does not."""
+    exact, pattern = getattr(cfg, "finish_string", ""), getattr(cfg, "finish_pattern", "")
+    rx = re.compile(pattern) if pattern else None
+
+    def hit(text: str) -> bool:
+        text = text.strip().strip(MARKS).strip()
+        return bool(text) and (text == exact or bool(rx and rx.fullmatch(text)))
+
+    def match(line: str) -> bool:
+        return hit(line) or bool(rx) and any(hit(b) for b in re.findall(r"\*\*(.+?)\*\*", line))
+    return match
 
 
 def load_config(assignment_dir) -> Config:
@@ -105,7 +141,8 @@ def load_config(assignment_dir) -> Config:
         raw = tomllib.loads((adir / "pilot.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"cannot read {adir / 'pilot.toml'}: {e}") from e
-    defaults = {f.name: "" if f.default is MISSING else f.default for f in fields(Config)[2:]}
+    defaults = {f.name: f.default_factory() if f.default_factory is not MISSING else "" if f.default is MISSING
+                else f.default for f in fields(Config)[2:]}
     if unknown := sorted(set(raw) - set(defaults)):
         raise ConfigError(f"pilot.toml: unknown key(s): {', '.join(unknown)}")
     if not raw.get("template"):
@@ -119,25 +156,78 @@ def load_config(assignment_dir) -> Config:
     if wd == adir or adir in wd.parents:
         raise ConfigError(f"work_dir {wd} is inside the assignment directory, where the tutor could find it")
     missing = [n for n in ("CLAUDE.md", ".claude/settings.json", vals["writeup"]) if not (tpl / n).is_file()]
-    script = next((t for t in shlex.split(vals["gate"]) if re.search(r"\.(py|sh|R|js|rb|pl)$", t)), None)
+    try:  # a gate may be any shell command; only a word naming a script file must exist in the template
+        words = shlex.split(vals["gate"])
+    except ValueError:
+        words = []
+    script = next((t for t in words if re.search(r"\.(py|sh|R|js|rb|pl)$", t) and not t.startswith(("-", "/", "$"))),
+                  None)
     if missing := missing + ([script] if script and not (tpl / script).is_file() else []):
         raise ConfigError(f"template {tpl} is missing {', '.join(missing)}")
+    for key in ("finish_pattern", "slot_heading", "part_heading"):
+        try:
+            re.compile(vals[key])
+        except re.error as e:
+            raise ConfigError(f"pilot.toml: {key} is not a regular expression: {e}") from e
+    if bad := [k for k in ("tutor_effort", "student_effort", "reader_effort") if vals[k] not in EFFORTS]:
+        raise ConfigError(f"pilot.toml: {', '.join(bad)} must be one of {', '.join(e for e in EFFORTS if e)}")
+    if bad := [s for s in vals["tutor_setting_sources"] if s not in ("user", "project", "local")]:
+        raise ConfigError(f"pilot.toml: tutor_setting_sources has {', '.join(bad)}; use user, project or local")
+    if vals["world"] and not (adir / vals["world"]).is_file():
+        raise ConfigError(f"pilot.toml: world module {adir / vals['world']} does not exist")
+    if bad := [n for n, t in vals["scenarios"].items() if not isinstance(t, dict) or set(t) - set(vals["settings"])]:
+        raise ConfigError(f"pilot.toml: [scenarios.{bad[0]}] must set only keys that [settings] defines")
+    if (vals["approve_servers"] or vals["restarts"]) and "local" not in vals["tutor_setting_sources"]:
+        raise ConfigError("pilot.toml: approve_servers and restarts need \"local\" in tutor_setting_sources, since "
+                          "the CLI keeps server approvals in .claude/settings.local.json")
     if not any(s["part"] is not None for s in _slots((tpl / vals["writeup"]).read_text(encoding="utf-8"),
-                                                     vals["slot_marker"], vals["part_heading"])):
-        raise ConfigError(f"{tpl / vals['writeup']} has no **Label:** {vals['slot_marker']} slot under a part heading")
+                                                     vals["slot_marker"], vals["part_heading"], vals["slot_heading"])):
+        shape = "heading slot" if vals["slot_heading"] else f"**Label:** {vals['slot_marker']} slot"
+        raise ConfigError(f"{tpl / vals['writeup']} has no {shape} under a part heading")
     return Config(assignment_dir=adir, runs_dir=adir / "runs", **vals)
 
 
+SECRETS: list[str] = []  # values never written to any record: each is replaced by REDACTED wherever it appears
+REDACTED = "[redacted]"
+
+
+def redact(text: str) -> str:
+    for secret in SECRETS:
+        text = text.replace(secret, REDACTED)
+    return text
+
+
+def read_token(cfg) -> str | None:
+    """The token in oauth_token_file (a `claude setup-token` token, not an API key), or None when the key is empty.
+    It is added to SECRETS, so no record ever holds it; the file's path is recorded, its contents never."""
+    if not getattr(cfg, "oauth_token_file", ""):
+        return None
+    path = Path(cfg.oauth_token_file).expanduser()
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise ConfigError(f"oauth_token_file {path} cannot be read: {e.strerror}") from e
+    if not token or len(token.split()) != 1:
+        raise ConfigError(f"oauth_token_file {path} should hold one token on one line")
+    if token not in SECRETS:
+        SECRETS.append(token)
+    return token
+
+
 def clean_env(cfg: Config) -> tuple[dict, list[str]]:
-    """os.environ without CLAUDE* and ANTHROPIC_* (except env_keep), and the names removed. Refuses an API key."""
+    """os.environ without CLAUDE* and ANTHROPIC_* (except env_keep), and the names removed. Refuses an API key.
+    With oauth_token_file, CLAUDE_CODE_OAUTH_TOKEN is set from that file."""
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         if os.environ.get(name):
             raise ConfigError(f"{name} is set; runs use subscription auth only. Unset it and run again.")
+    drop = tuple(getattr(cfg, "env_drop", ()))
     stripped = sorted(k for k in os.environ if (k.startswith(("CLAUDE", "ANTHROPIC_")) and k not in cfg.env_keep)
-                      or k in HOST_VARS)
+                      or k in HOST_VARS or any(k == d or d.endswith("*") and k.startswith(d[:-1]) for d in drop))
     env = {k: v for k, v in os.environ.items() if k not in stripped}
     venv = str(Path(sys.prefix).resolve())  # the library's own virtual environment (uv run puts it first on PATH)
     env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if not p.startswith(venv))
+    if token := read_token(cfg):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     return env, stripped
 
 
@@ -188,7 +278,8 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
             raise ConfigError(f"template {tpl} has no committed files; commit it first")
     elif not ((repo := Path(repo).expanduser().resolve()) / ".git").exists():
         raise ConfigError(f"--repo {repo} is not a git repository")
-    if bad := [w for w in LEAK_WORDS if w in str(repo or cfg.work_dir / base / tpl.name).lower()]:
+    name = cfg.repo_name or tpl.name
+    if bad := [w for w in LEAK_WORDS if w in str(repo or cfg.work_dir / base / name).lower()]:
         raise ConfigError(f"the tutor's path would contain {', '.join(bad)}; rename the persona or the template")
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
     for n in range(1, 1000):  # exclusive mkdir: a second run started in the same minute gets -2
@@ -200,7 +291,7 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None) -> dict:
     run_dir, ws, upstream = cfg.runs_dir / run_id, cfg.work_dir / run_id, {"url": cfg.upstream_url, "local": None}
     (ws / "tmp").mkdir(parents=True)
     if repo is None:
-        repo = ws / tpl.name
+        repo = ws / name
         for f in files:  # tracked files only, so untracked notes, logs and local settings never travel
             if not ((tpl / f).is_dir() and not (tpl / f).is_symlink()):  # a directory here is a submodule
                 (repo / f).parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +391,7 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
             shown += ["  (you may choose more than one; separate them with commas)"] if q.get("multiSelect") else []
         shown += ["", "Type an option's label or your own answer."]
         side = state["student_turn"] = _new_turn(turn["exchange"], "student")
-        await ask(state["student"], "\n".join(shown), side, cfg.turn_timeout_s, cfg.finish_string, split=True)
+        await ask(state["student"], "\n".join(shown), side, cfg.turn_timeout_s, split=True)
         _cost(state["cost"], "student", side)
         state["left"] = state["left"] or any(line.strip() == LEAVES for line in side["text"].splitlines())
         said = "\n".join(r.strip() for r in side["text"].splitlines() if r.strip() and r.strip() != LEAVES)
@@ -319,7 +410,8 @@ def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stde
                   max_budget_usd=cfg.max_usd, stderr=stderr)
     if actor == "tutor":  # Claude Code itself: its real prompt, the template's settings, every prompt to the callback
         return ClaudeAgentOptions(system_prompt={"type": "preset", "preset": "claude_code"},
-                                  setting_sources=["project"], include_hook_events=True, model=cfg.tutor_model or None,
+                                  setting_sources=list(cfg.tutor_setting_sources), include_hook_events=True,
+                                  model=cfg.tutor_model or None, effort=cfg.tutor_effort or None,
                                   env={**env, "TMPDIR": str(sb["workspace"] / "tmp"), **TUTOR_EXTRA_ENV}, **common)
     tools = STUDENT_TOOLS + (["Bash"] if cfg.student_bash else [])
     # allowed_tools approves these before can_use_tool is consulted, and reads inside the repo never prompt, so the
@@ -327,7 +419,7 @@ def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stde
     return ClaudeAgentOptions(system_prompt=persona["prompt"], setting_sources=[], allowed_tools=tools,
                               disallowed_tools=[t for t in OTHER_TOOLS + ["Bash"] if t not in tools],
                               hooks={"PreToolUse": [HookMatcher(hooks=[hook])]}, max_turns=STUDENT_MAX_TURNS,
-                              model=cfg.student_model or None, env=env, **common)
+                              model=cfg.student_model or None, effort=cfg.student_effort or None, env=env, **common)
 
 
 def _now() -> str:
@@ -341,13 +433,14 @@ def _new_turn(exchange, actor: str) -> dict:
             **({"fabrication": {"fired": False, "rule": None, "retried": False}} if actor == "student" else {})}
 
 
-async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, finish: str = "",
+async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, finish="",
               split: bool = False) -> tuple[str, str]:
     """Send one message and drain the reply into `turn` as it arrives. Returns (ok|timeout|error, error text).
     With `split` (student turns), text written before the actor's last tool call is narration to itself, not
     the message it types to Claude: it goes to `narration`, and `text` is what came after the last tool call."""
     t0, pending, texts, narr, status = time.monotonic(), {}, [], [], ["ok", ""]
     turn["text"] = ""
+    match = finish if callable(finish) else (lambda line: bool(finish) and line.strip() == finish)
 
     def take(msg):
         if isinstance(msg, HookEventMessage) and msg.subtype == "hook_response":
@@ -381,7 +474,7 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
                     # The finish string counts only as a whole line of command output, the way the gate prints it:
                     # a Read of a README that quotes it ended an early toy run in exchange 1.
                     lines = full.splitlines() if pending[b.tool_use_id]["name"] == "Bash" else []
-                    turn["finish_seen"] = turn["finish_seen"] or bool(finish) and finish in map(str.strip, lines)
+                    turn["finish_seen"] = turn["finish_seen"] or any(map(match, lines))
         elif isinstance(msg, ResultMessage):
             turn["session_id"], turn["result"] = msg.session_id, {k: getattr(msg, k) for k in RESULT_FIELDS}
             if msg.is_error:
@@ -421,10 +514,10 @@ def fabrication(text: str, tutor_text: str) -> str | None:
     return "c" if text.count(LEAVES) > 1 or (at and any(line.strip() for line in lines[at[0] + 1:])) else None
 
 
-def _slots(text: str, marker: str, part_heading: str) -> list[dict]:
+def _slots(text: str, marker: str, part_heading: str, slot_heading: str = "") -> list[dict]:
     try:
         from . import facts
-        return facts.slots(text, marker, part_heading)
+        return facts.slots(text, marker, part_heading, slot_heading)
     except Exception:  # facts.py missing or broken: the same rule, locally
         part, out = None, []
         for line in text.splitlines():
@@ -444,7 +537,8 @@ def snapshot(repo: Path, prev: dict | None, cfg: Config) -> tuple[dict, dict]:
             files[f] = ((st := (repo / f).lstat()).st_size, st.st_mtime_ns)
     head = _git(repo, "rev-parse", "--short", "HEAD", check=False).strip() or None
     try:
-        slots = _slots((repo / cfg.writeup).read_text(encoding="utf-8"), cfg.slot_marker, cfg.part_heading)
+        slots = _slots((repo / cfg.writeup).read_text(encoding="utf-8"), cfg.slot_marker, cfg.part_heading,
+                       cfg.slot_heading)
     except OSError:
         slots = []
     now = {"files": files, "head": head, "slots": slots}
@@ -463,13 +557,13 @@ def snapshot(repo: Path, prev: dict | None, cfg: Config) -> tuple[dict, dict]:
 
 def _append(path: Path, text: str) -> None:
     with open(path, "a", encoding="utf-8") as f:
-        f.write(text)
+        f.write(redact(text))
         f.flush()
         os.fsync(f.fileno())
 
 
 def _write_json(path: Path, data: dict) -> None:
-    (tmp := path.with_name(path.name + ".tmp")).write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+    (tmp := path.with_name(path.name + ".tmp")).write_text(redact(json.dumps(data, indent=1, ensure_ascii=False)) + "\n")
     os.replace(tmp, path)
 
 
@@ -487,6 +581,32 @@ def _render_turn(turn: dict, for_student: bool = False) -> str:
                 for p in turn["prompts"]]
         head = "" if for_student else f"## Exchange {turn['exchange']} · {turn['actor']}\n"
         return head + "\n".join(out) + ("\n" if for_student else "\n\n")
+
+
+class _Log:
+    """run.log, line-buffered, with every secret redacted."""
+
+    def __init__(self, path: Path):
+        self.f = open(path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, text: str) -> None:
+        self.f.write(redact(text))
+
+    def close(self) -> None:
+        self.f.close()
+
+
+def session_efforts(config_dir, session_ids) -> list[str]:
+    """The effort levels the CLI recorded (`perTurnEffort` on each assistant line) in these sessions' transcripts
+    under config_dir/projects/; the evidence that an effort setting took effect, since the init message omits it."""
+    seen = []
+    for sid in filter(None, session_ids):
+        for path in Path(config_dir).glob(f"projects/*/{sid}.jsonl") if config_dir else []:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                with contextlib.suppress(ValueError, AttributeError):
+                    if (e := json.loads(line).get("perTurnEffort")) and e not in seen:
+                        seen.append(e)
+    return seen
 
 
 def record_turn(run_dir: Path, turn: dict) -> None:
@@ -513,6 +633,9 @@ def _stop(turn: dict, status: str, cost: dict, cfg: Config) -> str | None:
 
 
 def _gate(cfg: Config, repo: Path, run_dir: Path) -> None:
+    """Run the end-of-run check and write gate.txt; an empty gate writes nothing."""
+    if not cfg.gate.strip():
+        return
     try:
         p = subprocess.run(cfg.gate, shell=True, cwd=repo, timeout=cfg.turn_timeout_s, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True)
@@ -522,14 +645,16 @@ def _gate(cfg: Config, repo: Path, run_dir: Path) -> None:
                                           for b in (e.stdout, e.stderr))
     except Exception as e:
         body = f"exit error\n{type(e).__name__}: {e}\n"
-    (run_dir / "gate.txt").write_text(body, encoding="utf-8")
+    (run_dir / "gate.txt").write_text(redact(body), encoding="utf-8")
 
 
 def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int | None = None) -> Path:
     """Run one persona against the template and return the run directory. Raises ConfigError before starting."""
-    _, stripped = clean_env(cfg)
+    env, stripped = clean_env(cfg)
     for name in stripped:  # the SDK hands os.environ to both CLIs
         os.environ.pop(name, None)
+    if "CLAUDE_CODE_OAUTH_TOKEN" in env:  # from oauth_token_file; never recorded (see SECRETS)
+        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = env["CLAUDE_CODE_OAUTH_TOKEN"]
     who = load_persona(cfg, persona)
     sb = build_sandbox(cfg, who, repo=repo)
     asyncio.run(_drive(cfg, who, sb, stripped, turns or cfg.max_turns))
@@ -538,7 +663,7 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
 
 async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limit: int) -> None:
     run_dir, repo = sb["run_dir"], sb["repo"]
-    log = open(run_dir / "run.log", "a", encoding="utf-8", buffering=1)
+    log = _Log(run_dir / "run.log")
     (run_dir / "persona.md").write_text(persona["raw"], encoding="utf-8")  # the sheet as this run was given it
     run = {"run_id": sb["run_id"], "status": "running", "assignment_dir": str(cfg.assignment_dir),
            "persona": persona["key"], "student_name": persona["name"], "student_email": persona["email"],
@@ -564,25 +689,25 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                                                          lambda s: log.write(f"[student] {s}\n"), student_hook))
     tutor = ClaudeSDKClient(options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n")))
     ended_by, error, open_turn, prev, tutor_text, sessions = None, sb["setup_error"], None, None, "", {}
+    finish = finish_matcher(cfg)
 
     async def step(exchange: int, actor: str, client: ClaudeSDKClient, prompt: str) -> tuple[dict, str]:
         """One actor turn: ask, re-ask once if needed, measure the repo, decide whether to stop, record."""
         nonlocal open_turn, prev
         turn = open_turn = state[f"{actor}_turn"] = _new_turn(exchange, actor)
         student = actor == "student"
-        status, detail = await ask(client, prompt, turn, cfg.turn_timeout_s, cfg.finish_string, split=student)
+        status, detail = await ask(client, prompt, turn, cfg.turn_timeout_s, finish, split=student)
         if student:
             if status == "ok" and turn["result"] and not turn["text"].strip():
-                status, detail = await ask(client, SILENT_PROMPT, turn, cfg.turn_timeout_s, cfg.finish_string,
+                status, detail = await ask(client, SILENT_PROMPT, turn, cfg.turn_timeout_s, finish,
                                            split=True)
             rule = fabrication(turn["text"], tutor_text) if status == "ok" else None
             turn["fabrication"] = {"fired": bool(rule), "rule": rule, "retried": bool(rule)}
             if rule:  # re-ask once and use the second reply whatever it is
-                status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, cfg.finish_string,
+                status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, finish,
                                            split=True)
-        if not student and cfg.finish_string:  # the tutor may say the finish phrase in its text, as a whole line
-            turn["finish_seen"] = turn["finish_seen"] or any(
-                line.strip().strip("*_#`").strip() == cfg.finish_string for line in turn["text"].splitlines())
+        if not student:  # the tutor may say the finish phrase in its own text: a whole line, or a bold span
+            turn["finish_seen"] = turn["finish_seen"] or any(map(finish, turn["text"].splitlines()))
         prev, changes = snapshot(repo, prev, cfg)
         turn.update(changes)
         _cost(state["cost"], actor, turn)
@@ -636,6 +761,8 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         failed = ended_by in ("error", "timeout", "killed", None)
         run.update(status="failed" if failed else "finished", ended=_now(), ended_by=ended_by,
                    error=error if failed else None, session_ids={a: sessions.get(a) for a in ("tutor", "student")})
+        run["effort"] = {a: {"asked": getattr(cfg, f"{a}_effort") or None,
+                             "seen": session_efforts(sb["config_dirs"][a], [sessions.get(a)])} for a in ("tutor", "student")}
         _write_json(run_dir / "run.json", run)
         try:
             from . import facts
