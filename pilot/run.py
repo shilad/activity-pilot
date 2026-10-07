@@ -682,6 +682,27 @@ def session_efforts(config_dir, session_ids) -> list[str]:
     return seen
 
 
+def reap(folders) -> list[str]:
+    """Stop this user's processes whose working folder is inside one of `folders` (what a tutor left running in
+    the background). Returns one line per process stopped. Uses lsof; does nothing where it is missing."""
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-u", str(os.getuid()), "-Fpn"], capture_output=True,
+                             text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    roots, pid, stopped = [str(Path(f).resolve()) for f in folders], None, []
+    for line in out.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid and pid != os.getpid() and any(
+                line[1:] == r or line[1:].startswith(r + os.sep) for r in roots):
+            cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGTERM)
+                stopped.append(f"{pid} {cmd.strip()[:200]}")
+    return stopped
+
+
 def record_turn(run_dir: Path, turn: dict) -> None:
     """Append the turn to turns.jsonl (fsynced) and its block to transcript.md."""
     _append(run_dir / "turns.jsonl", json.dumps(turn, ensure_ascii=False) + "\n")
@@ -723,9 +744,12 @@ def _gate(cfg: Config, repo: Path, run_dir: Path, env: dict | None = None) -> No
 
 
 def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int | None = None,
-            scenario: list[str] | None = None) -> Path:
+            scenario: list[str] | None = None, student=None, tutor=None) -> Path:
     """Run one persona against the template and return the run directory. Raises ConfigError before starting.
-    `scenario` lists --scenario picks: `key=value` settings or preset names from pilot.toml."""
+    `scenario` lists --scenario picks: `key=value` settings or preset names from pilot.toml. `student`, for probes
+    and tests, makes the student's client instead of a model session: student(env, tools_by_name, cwd), e.g.
+    `lambda env, tools, cwd: ScriptedStudent(script, env=env, tools=tools, cwd=cwd)` (pilot/scripted.py). `tutor`,
+    for tests only, makes the tutor's client from its ClaudeAgentOptions instead of ClaudeSDKClient."""
     from .world import ScenarioError, resolve_scenario
     try:
         picked = resolve_scenario(cfg.settings, cfg.scenarios, scenario)
@@ -739,11 +763,12 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
     who = load_persona(cfg, persona)
     sb = build_sandbox(cfg, who, repo=repo)
     sb["scenario"] = picked
-    asyncio.run(_drive(cfg, who, sb, stripped, turns or cfg.max_turns))
+    asyncio.run(_drive(cfg, who, sb, stripped, turns or cfg.max_turns, student, tutor))
     return sb["run_dir"]
 
 
-async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limit: int) -> None:
+async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limit: int, make_student=None,
+                 make_tutor=None) -> None:
     from . import terminal
     from .world import Context, call, load_world
     run_dir, repo, home = sb["run_dir"], sb["repo"], sb.get("home")
@@ -815,15 +840,17 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         prompt = prompt.replace(NO_APPS, note.strip()) if NO_APPS in prompt else prompt + "\n\n" + note.strip()
     tutor_tool, student_tool, student_hook = callbacks(cfg, persona, repo, state)
     warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)  # expected: the hook polices instead
-    student = state["student"] = ClaudeSDKClient(options(
-        cfg, sb, persona, "student", student_tool, lambda s: log.write(f"[student] {s}\n"), student_hook,
-        env=student_env, servers=servers, extra_tools=extra, prompt=prompt))
+    student = state["student"] = make_student(
+        {**os.environ, **student_env}, {t.name: t for t in tools}, repo) if make_student else ClaudeSDKClient(options(
+            cfg, sb, persona, "student", student_tool, lambda s: log.write(f"[student] {s}\n"), student_hook,
+            env=student_env, servers=servers, extra_tools=extra, prompt=prompt))
 
     def new_tutor(resume=None, path=None, cwd=None) -> ClaudeSDKClient:
         state["tutor_fresh"] = True  # the next tutor turn keeps its init details (servers and tools at start)
         env = {**tutor_env, **({"PATH": path} if path else {})}
-        return ClaudeSDKClient(options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n"),
-                                       env=env, resume=resume, cwd=cwd))
+        opts = options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n"), env=env,
+                       resume=resume, cwd=cwd)
+        return make_tutor(opts) if make_tutor else ClaudeSDKClient(opts)
 
     def with_notices(text: str) -> str:
         shown = "".join(NOTICE.format(text=n.strip()) for n in state["notices"])
@@ -904,15 +931,22 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         turn, _ = await step(exchange, "student", student, screen, kind="picker", post=post)
         return chosen[0], (turn if turn["stop"] else None)
 
-    async def close_tutor(exchange: int) -> None:
+    async def close_tutor(exchange: int, kind: str = "exit") -> None:
+        """Close the tutor's CLI (/exit, or a switch to another conversation by /resume)."""
         nonlocal tutor
         try:
             await asyncio.wait_for(tutor.disconnect(), 30)
         except Exception as e:
             log.write(f"[run] disconnect failed: {type(e).__name__}: {e}\n")
         tutor = None
-        run["restarts"].append({"exchange": exchange, "type": "exit", "session": sessions.get("tutor")})
+        run["restarts"].append({"exchange": exchange, "type": kind, "session": sessions.get("tutor")})
         _write_json(run_dir / "run.json", run)
+
+    async def run_session(exchange: int, resumed: str | None, cwd: str) -> None:
+        """Note a tutor session starting: a new conversation, or `resumed` reopened."""
+        if exchange > 1 or resumed:
+            run["restarts"].append({"exchange": exchange, "type": "session", "resumed": resumed, "cwd": cwd})
+            _write_json(run_dir / "run.json", run)
 
     def note_session(turn: dict, sent: str, cwd: str) -> None:
         if sid := turn.get("session_id"):
@@ -935,16 +969,18 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             return
         tutor, tutor_cwd = new_tutor(), str(repo)
         await tutor.connect()
-        message, queued, exchange = FIRST_PROMPT, None, 0
+        await run_session(1, None, str(repo))
+        message, typed, exchange = FIRST_PROMPT, None, 0
+        launch = None  # Claude Code started from the terminal, its conversation not chosen yet: {"path", "cwd"}
         while True:
-            if queued is None:
+            if typed is None:
                 exchange += 1
                 if exchange > limit:
                     ended_by = "max_turns"
                     break
-                kind, started = "message" if tutor else "terminal", {}
+                kind, started = "message" if (tutor or launch) else "terminal", {}
 
-                def post(turn, kind=kind):
+                def post(turn, kind=kind, started=started):
                     if kind == "message" and cfg.restarts and terminal.is_exit(turn["text"]):
                         turn["event"] = {"type": "exit"}
                     elif kind == "terminal" and (req := terminal.take_start(sb["terminal"])):
@@ -954,50 +990,69 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                     elif kind == "message" and sb.get("terminal") and (req := terminal.take_start(sb["terminal"])):
                         log.write(f"[run] the student started a second Claude Code in {req.get('cwd')}; ignored\n")
                 turn, detail = await step(exchange, "student", student, with_notices(message), kind=kind, post=post)
-                path = started.get("path")
                 if turn["stop"]:
                     ended_by, error = turn["stop"], detail or None
                     break
                 event = turn.get("event") or {}
-                if event.get("type") == "exit":
-                    await close_tutor(exchange)
-                    message = TERMINAL_PROMPT.format(cwd=repo)
-                    continue
                 if kind == "terminal":
                     if event.get("type") != "start":
                         message = TERMINAL_AGAIN
                         continue
-                    cwd, mode, typed = event["cwd"] or str(repo), event["mode"], turn["text"].strip()
+                    cwd, mode = event["cwd"] or str(repo), event["mode"]
+                    run["restarts"].append({"exchange": exchange, "type": "start", "cwd": cwd, "mode": mode})
                     if stopped := await approve(exchange, first=False):
                         ended_by = stopped["stop"]
                         break
-                    resume = None
-                    mine = [s for s in known.values() if s["cwd"] == cwd]
-                    if mode == "continue":
-                        resume = max(mine, key=lambda s: s["last"])["id"] if mine else None
-                    elif mode.startswith("resume:") and mode[7:] in known:
-                        resume = mode[7:]
-                    elif mode != "new" or terminal.is_resume(typed):
+                    launch = {"path": started.get("path"), "cwd": cwd}
+                    mine = [x for x in known.values() if x["cwd"] == cwd]
+                    resume = (max(mine, key=lambda x: x["last"])["id"] if mine else None) if mode == "continue" \
+                        else mode[7:] if mode.startswith("resume:") and mode[7:] in known else None
+                    if mode == "picker" or (mode.startswith("resume:") and not resume):
                         resume, stopped = await pick(exchange, cwd)
-                        typed = ""
                         if stopped:
                             ended_by = stopped["stop"]
                             break
-                    tutor, tutor_cwd = new_tutor(resume=resume, path=path, cwd=cwd), cwd
-                    await tutor.connect()
-                    run["restarts"].append({"exchange": exchange, "type": "start", "cwd": cwd, "resumed": resume,
-                                            "mode": mode})
-                    _write_json(run_dir / "run.json", run)
-                    if typed and not terminal.is_resume(typed):
-                        queued = typed
-                    else:
+                    if resume:
+                        tutor, tutor_cwd, launch = new_tutor(resume=resume, path=launch["path"], cwd=cwd), cwd, None
+                        await tutor.connect()
+                        await run_session(exchange, resume, cwd)
+                    typed = turn["text"].strip() or None
+                    if typed is None:
                         message = (RESUMED_PROMPT if resume else STARTED_PROMPT).format(cwd=cwd)
                         continue
                 else:
-                    queued = turn["text"]
-            turn, detail = await step(exchange, "tutor", tutor, queued)
-            note_session(turn, queued, tutor_cwd)
-            queued, tutor_text, message = None, turn["text"], _render_turn(turn, for_student=True)
+                    typed = turn["text"]
+            text, typed = typed, None
+            if cfg.restarts and terminal.is_exit(text):
+                if tutor:
+                    await close_tutor(exchange)
+                else:
+                    run["restarts"].append({"exchange": exchange, "type": "exit", "session": None})
+                tutor, launch, message = None, None, TERMINAL_PROMPT.format(cwd=repo)
+                continue
+            if cfg.restarts and terminal.is_resume(text):  # the picker; a pick reopens that conversation
+                here = launch["cwd"] if launch else tutor_cwd
+                picked, stopped = await pick(exchange, here)
+                if stopped:
+                    ended_by = stopped["stop"]
+                    break
+                if picked:
+                    path = launch["path"] if launch else None
+                    if tutor:
+                        await close_tutor(exchange, kind="switch")
+                    tutor, tutor_cwd, launch = new_tutor(resume=picked, path=path, cwd=here), here, None
+                    await tutor.connect()
+                    await run_session(exchange, picked, here)
+                message = RESUMED_PROMPT if picked else STARTED_PROMPT.format(cwd=here)
+                continue
+            if launch:  # the first message after a start: a new conversation
+                tutor, tutor_cwd = new_tutor(path=launch["path"], cwd=launch["cwd"]), launch["cwd"]
+                launch = None
+                await tutor.connect()
+                await run_session(exchange, None, tutor_cwd)
+            turn, detail = await step(exchange, "tutor", tutor, text)
+            note_session(turn, text, tutor_cwd)
+            tutor_text, message = turn["text"], _render_turn(turn, for_student=True)
             if turn["stop"]:
                 ended_by, error = turn["stop"], detail or None
                 break
@@ -1029,6 +1084,9 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                     await asyncio.wait_for(client.disconnect(), 30)
             except Exception as e:
                 log.write(f"[run] disconnect failed: {type(e).__name__}: {e}\n")
+        if home or world is not None:  # programs the tutor left running there (a viewer, a server)
+            for line in reap([sb["workspace"]] + ([home] if home else [])):
+                log.write(f"[run] stopped a leftover process: {line}\n")
         failed = ended_by in ("error", "timeout", "killed", None)
         run.update(status="failed" if failed else "finished", ended=_now(), ended_by=ended_by,
                    error=error if failed else None, session_ids={a: sessions.get(a) for a in ("tutor", "student")})

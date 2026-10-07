@@ -290,6 +290,7 @@ def summarize(run_dir: Path, cfg) -> dict:
         "scenario": run.get("scenario"),
         "restarts": {"exits": [r.get("exchange") for r in run.get("restarts") or [] if r.get("type") == "exit"],
                      "starts": [r for r in run.get("restarts") or [] if r.get("type") == "start"],
+                     "sessions": [r for r in run.get("restarts") or [] if r.get("type") == "session"],
                      "count": sum(r.get("type") == "start" for r in run.get("restarts") or [])},
         "approvals": run.get("approvals") or [],
         "side_turns": [{"exchange": t.get("exchange"), "label": t.get("label"), "seconds": t.get("seconds")}
