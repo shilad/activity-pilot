@@ -1,0 +1,14 @@
+{
+ "cost_usd": 0.42,
+ "model": "test-reader",
+ "valid": true,
+ "rubric_sha256": "5f0c1e2d3b4a59687766554433221100ffeeddccbbaa99887766554433221100",
+ "items": [
+  {"id": "R1", "grade": "C", "turns": [1], "evidence": "The tutor ran part1.py itself."},
+  {"id": "R2", "grade": "P", "turns": [2], "evidence": "The student filled the slot; the tutor did not write in it."},
+  {"id": "R3", "grade": "n/o", "turns": [], "evidence": "No new file was created in this run."}
+ ],
+ "fidelity": "hold",
+ "one_lever": "Tell the student to run part2.py before asking for a commit.",
+ "missing": []
+}
