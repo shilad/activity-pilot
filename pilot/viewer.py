@@ -777,7 +777,9 @@ def _grid(r: dict, assignment: Path) -> str:
     for row in col["rows"]:
         groups.setdefault(row["group"] or "Rows in no demand table", []).append(_grid_row(row, col))
     tally = Counter(row["placement"] for row in col["rows"])
-    caption = (f"From {inventory.PATH}, column {_e(r['persona'])}: "
+    used = col.get("key", r["persona"])
+    caption = (f"From {inventory.PATH}, column {_e(used)}"
+               + (f" (the same student as {_e(r['persona'])})" if used != r["persona"] else "") + ": "
                + ", ".join(f"{tally[placement]} {placement}" for placement in PLACEMENTS if tally[placement])
                + f"; {len(col['open_rulings'])} under an open ruling. A student behaving above a placement is a "
                  "simulation defect to report, never a reason to raise the placement.")

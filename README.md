@@ -122,7 +122,7 @@ assignment repo, `runs/<run-id>/` holds `run.json`, `turns.jsonl` and `transcrip
   exchange, stalls, `tutor_left_repo`, `suspicion`, `student_saw_rules`, `persona_drift`, `student_wrote_tutor_side`.
 - **`runs/viewer.html`** (`pilot view`): all runs on one offline page, each marked by how it ended, with its
   conversation, gate and writeup slots, scorecard, student (and its column of `personas/INVENTORY.md`, when there is
-  one) and every field of `facts.json` and `run.json`. It also shows what restarts, worlds and the newer keys record:
+  one; a later sitting's sheet such as `careful-p1` uses the column of the sheet naming the same student) and every field of `facts.json` and `run.json`. It also shows what restarts, worlds and the newer keys record:
   side turns and messages typed while Claude worked, the start-up question's answer, a ruled break where Claude Code
   closed or started again, `[world]` lines placed by time, background work, the continued run (`--from-run`, linked),
   the scenario, the rubric, the sandbox, cost per model, and a loud warning when the tutor loaded instruction files

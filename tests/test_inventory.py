@@ -13,7 +13,7 @@ BELIEF_1 = ('Every number a script prints is an average. Fires when part1.py pri
 
 def test_column():
     col = inventory.column(FIXTURE, "jordan")
-    assert sorted(col) == ["beliefs", "open_rulings", "rows"]
+    assert sorted(col) == ["beliefs", "key", "open_rulings", "rows"] and col["key"] == "jordan"
     assert col["rows"][0] == {"id": "M1", "group": "Group A — Running things",
                               "demand": "Running a script from a terminal", "where": "Part 1", "teaches": "teaches",
                               "placement": "solid", "footnote": None, "draft": False, "note": ""}
@@ -63,3 +63,17 @@ def test_reader_materials_carry_the_grid(tmp_path):
     assert ids == ["T1", "T2", "T3"]
     (root / "personas" / "INVENTORY.md").unlink()
     assert "placement grid" not in reader.materials(run_dir, cfg, {"persona": "jordan"})[0]
+
+
+
+def test_a_later_sitting_uses_the_same_students_column(tmp_path):
+    """jordan-p1 has no column; jordan.md names the same student, so jordan's column is used."""
+    a = tmp_path / "course"
+    shutil.copytree(FIXTURE, a)
+    first = (a / "personas" / "jordan.md").read_text().splitlines()[0]
+    (a / "personas" / "jordan-p1.md").write_text(first + "\n## Who you are\nlater\n")
+    col = inventory.column(a, "jordan-p1")
+    assert col is not None and col["key"] == "jordan" and col["rows"] == inventory.column(a, "jordan")["rows"]
+    (a / "personas" / "stranger.md").write_text("# Someone Else <s@example.edu>\n")
+    assert inventory.column(a, "stranger") is None
+    assert inventory.column(a, "nobody") is None

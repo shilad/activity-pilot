@@ -21,9 +21,12 @@ RULING = re.compile(r"[-*]\s+\*\*(.+?)\*\*\s*(?:\(([^)]*)\))?")  # - **<row id>*
 def column(assignment_dir: Path, key: str | None) -> dict | None:
     """One persona's column, joined to what each row demands; None when there is no file, no column or no rows.
 
-    Returns {"rows", "beliefs", "open_rulings"}: rows in grid order, each {"id", "group", "demand", "where",
-    "teaches", "placement", "footnote", "draft", "note"}; beliefs maps a footnote number to its text; and
-    open_rulings lists the row ids an Open rulings bullet names for this persona.
+    A key the grid has no column for uses the column of another sheet for the same student: the sheet in
+    personas/ whose first line (`# Name <email>`) is the same, such as careful for careful-p1, a later sitting.
+
+    Returns {"key", "rows", "beliefs", "open_rulings"}: the column used; rows in grid order, each {"id", "group",
+    "demand", "where", "teaches", "placement", "footnote", "draft", "note"}; beliefs maps a footnote number to its
+    text; and open_rulings lists the row ids an Open rulings bullet names for this persona.
     """
     if not key:
         return None
@@ -31,7 +34,26 @@ def column(assignment_dir: Path, key: str | None) -> dict | None:
         text = (assignment_dir / PATH).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    return _parse(text, key)
+    col = _parse(text, key)
+    if col is None and (same := _same_student(assignment_dir, key, text)):
+        col = _parse(text, same)
+    return col
+
+
+def _same_student(assignment_dir: Path, key: str, text: str) -> str | None:
+    """The grid column of another sheet whose first line names the same student (name and email), if exactly one."""
+    def first(sheet: Path) -> str:
+        try:
+            return sheet.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, UnicodeDecodeError, IndexError):
+            return ""
+    folder = assignment_dir / "personas"
+    mine = first(folder / f"{key}.md")
+    if not mine:
+        return None
+    columns = {cell for table in _tables(text.splitlines()) if table["head"][:1] == ["#"] for cell in table["head"][1:]}
+    same = [s.stem for s in sorted(folder.glob("*.md")) if s.stem != key and s.stem in columns and first(s) == mine]
+    return same[0] if len(same) == 1 else None
 
 
 def as_text(col: dict) -> str:
@@ -67,7 +89,7 @@ def _parse(text: str, key: str) -> dict | None:
     if not rows:
         return None
     ruled = _open_rulings(lines, grid["head"][1:], key, {row["id"] for row in rows})
-    return {"rows": rows, "beliefs": _beliefs(lines), "open_rulings": ruled}
+    return {"key": key, "rows": rows, "beliefs": _beliefs(lines), "open_rulings": ruled}
 
 
 def _plain(text: str) -> str:

@@ -172,9 +172,11 @@ def sheet(run_dir: Path, cfg: Config, initials: str) -> Path
 def build(cfg: Config) -> Path                                            # runs/viewer.html
 # pilot/inventory.py (the optional personas/INVENTORY.md, shaped as personas/FORMAT.md says)
 def column(assignment_dir: Path, key: str) -> dict | None                 # one persona's placements, or None
+#   a key with no column (careful-p1) uses the column of the sheet whose first line names the same student;
+#   the result's "key" is the column used
 def as_text(col: dict) -> str                                             # one line per row, for the reader
 # pilot/reader.py
-async def read(run_dir: Path, cfg: Config) -> Path                        # scorecard.md (+ scorecard.json)
+async def read(run_dir: Path, cfg: Config, rubric: Path | None = None) -> Path  # scorecard.md (+ .json)
 # pilot/cli.py
 def main(argv: list[str] | None = None) -> int
 # pilot/terminal.py (Claude Code's screens acted out), pilot/world.py (scenarios, Context, load_world),

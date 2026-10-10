@@ -105,6 +105,9 @@ reads four things from it and ignores the rest:
   the row id in bold and then, in parentheses, the persona keys it concerns: `- **G8** (steady): ...`. A bullet
   that names no key concerns every column.
 
+A persona key with no column of its own (a later sitting's sheet, such as `careful-p1`) uses the column of the
+sheet whose first line names the same student (`# Name <email>`), when exactly one such sheet has a column.
+
 The governing rule: a student behaving above a placement is a simulation defect to report, never a reason to raise
 the placement. Placements change only by the instructor's ruling. The viewer's student tab shows the run's persona
 column, and the reader receives it for the fidelity check and cites its row ids. Without the file, or without the

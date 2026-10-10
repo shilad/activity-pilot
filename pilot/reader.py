@@ -39,7 +39,8 @@ def materials(run_dir: Path, cfg, run: dict, rubric_file: Path | None = None) ->
              ("persona sheet", persona.read_text(encoding="utf-8") if persona.exists() else "(missing)")]
     key = run.get("persona")
     if (grid := inventory.column(cfg.runs_dir.parent, key)) is not None:
-        parts.append((f"placement grid for this persona ({inventory.PATH}, column {key})", inventory.as_text(grid)))
+        parts.append((f"placement grid for this persona ({inventory.PATH}, column {grid['key']})",
+                      inventory.as_text(grid)))
     parts += [("facts.json", (run_dir / "facts.json").read_text() if (run_dir / "facts.json").exists() else "{}"),
               ("transcript.md", (run_dir / "transcript.md").read_text(encoding="utf-8"))]
     return "\n\n".join(f"===== {name} =====\n{body}" for name, body in parts), rubric_items(rubric)
