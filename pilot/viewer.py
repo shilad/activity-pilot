@@ -65,10 +65,6 @@ STUDENT_FACTS = (("Median words per student message", "student_words_median"),
 SIDES = ("tutor", "student")
 # The input field that names what a tool call acted on, tried in this order.
 TARGET_KEYS = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "skill", "description")
-# turns.jsonl fields the conversation shows. fabrication stays in each turn's record: when it did not fire, it
-# appears nowhere else.
-SHOWN = {"exchange", "actor", "kind", "text", "narration", "tools", "prompts", "asks", "hooks", "event", "stop",
-         "commits", "files_changed"}
 SHEET_NAME = re.compile(r"#\s+(.+?)\s*(<[^>]*>)?\s*$")  # a sheet's first line: # Name <email>
 HEADING = re.compile(r"(#{1,6})\s+(.*)")
 LIST_ITEM = re.compile(r"([-*+]|\d+[.)])\s+(.*)")
@@ -418,7 +414,8 @@ def _conversation(r: dict, index: int) -> str:
 
 def _turn(turn: dict) -> str:
     """One side's turn: who, how long and the session's running cost; the message as a bubble; the student's own
-    commands or the tutor's tool calls; the bracketed lines; and the rest of the turn's record behind a click."""
+    commands or the tutor's tool calls; and the bracketed lines. The rest of the turn's record (session id, token
+    counts, head) stays in turns.jsonl: shown under every message it doubled the page and buried the conversation."""
     actor = turn.get("actor") or "unknown"
     who = actor.capitalize() + (f" ({KIND.get(turn['kind'], turn['kind'])})" if turn.get("kind") else "")
     timing = [f"{turn['seconds']:.1f} s"] if turn.get("seconds") is not None else []
@@ -427,10 +424,9 @@ def _turn(turn: dict) -> str:
     text = turn.get("text") or ""
     message = _markdown(text) if text.strip() else "<p>No text this turn.</p>"
     actions = _student_commands(turn) if actor == "student" else _tutor_calls(turn)
-    record = {key: value for key, value in turn.items() if key not in SHOWN}
     return (f'<div class="turn turn-{"student" if actor == "student" else "tutor"}"><header><span class="who">'
             f'{_e(who)}</span><span>{_e(" · ".join(timing))}</span></header><div class="bubble text">{message}</div>'
-            + actions + _bracketed(turn) + _details("Turn record", _fields(record)) + "</div>")
+            + actions + _bracketed(turn) + "</div>")
 
 
 def _student_commands(turn: dict) -> str:
@@ -709,7 +705,7 @@ def _how_to_read(finish: str | None) -> str:
         "when it came back with an error; click one for its input and output. A line in square brackets is a "
         "permission prompt, a question Claude asked, a hook, or an event such as Claude Code being closed. The other "
         "tabs hold the gate's output and the writeup slots, the reader's grades, the persona sheet with the persona's "
-        "column of the placement grid when the assignment has one, and every recorded field.</p>")
+        "column of the placement grid when the assignment has one, and every field of facts.json and run.json.</p>")
 
 
 # The dark palette, used by both dark-mode blocks in CSS: when the system asks for dark (unless the page is set to
