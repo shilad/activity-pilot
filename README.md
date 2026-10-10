@@ -57,6 +57,7 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 <assignment>-pilot/       private, one per assignment; never visible to the tutor
   pilot.toml
   personas/<name>.md      one sheet per persona, in the library's personas/FORMAT.md format
+  personas/INVENTORY.md   optional: what the assignment demands, each persona placed on it (FORMAT.md)
   rubric.md               "- **ID** text" lines; the reader grades each; ends with **ONE_LEVER**
   runs/<run-id>/          records; commit these
 ```
@@ -119,7 +120,9 @@ assignment repo, `runs/<run-id>/` holds `run.json`, `turns.jsonl` and `transcrip
   student stopped), `max_turns`, `budget`, `timeout`, `error`, `student_silent`, `student_loop` or `crashed`.
   Also minutes, cost, tokens, windows, hours band, prompts, hooks, files, slots and commits by actor, parts by
   exchange, stalls, `tutor_left_repo`, `suspicion`, `student_saw_rules`, `persona_drift`, `student_wrote_tutor_side`.
-- **`runs/viewer.html`** (`pilot view`): all runs on one offline page, with tool calls, prompts, hooks and facts.
+- **`runs/viewer.html`** (`pilot view`): all runs on one offline page, each marked by how it ended, with its
+  conversation, gate and writeup slots, scorecard, student (and its column of `personas/INVENTORY.md`, when there is
+  one) and every field of `facts.json` and `run.json`.
 - **`scorecard.md`** (`pilot read`): each rubric item graded C, P, I or n/o with its exchanges; the arc;
   stalls; a fidelity check on the student ending `Fidelity: hold | drifted | broke`; what the run could not
   show; and a `ONE LEVER:` line. Do not quote a `broke` run for anything the student did.
@@ -220,7 +223,8 @@ count only messages for words, drift and silence.
 - **Fabricated tutor turns detected and re-asked.** A student message that writes the tutor's side is re-asked
   once and recorded (`fabrication` per turn, `student_wrote_tutor_side` in facts).
 - **Drift and fidelity reported per run.** `persona_drift` compares early and late message length; the
-  reader's fidelity section says whether the student stayed within its sheet.
+  reader's fidelity section says whether the student stayed within its sheet and, with a placement grid, names the
+  rows it went above.
 - **The roster.** Personas meant to test a template's rules must include the students who stress them;
   `personas/FORMAT.md` lists them and says how to write a sheet the student stays within.
 

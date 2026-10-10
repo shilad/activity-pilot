@@ -6,6 +6,7 @@ from pathlib import Path
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
 
+from . import inventory
 from .run import OTHER_TOOLS, STUDENT_TOOLS, clean_env
 
 ITEM_RE = re.compile(r"^- \*\*([A-Za-z][A-Za-z0-9_]*)\*\*")  # a rubric item line: - **ID** text
@@ -28,15 +29,19 @@ def rubric_items(text: str) -> list[str]:
 
 
 def materials(run_dir: Path, cfg, run: dict, rubric_file: Path | None = None) -> tuple[str, list[str]]:
-    """The user message: the rubric, the template's rules, the persona sheet, the facts and the transcript."""
+    """The user message: the rubric (`rubric_file`, else rubric.md), the template's rules, the persona sheet (and the
+    persona's column of the placement grid, when personas/INVENTORY.md has one), the facts and the transcript."""
     rubric = (rubric_file or cfg.runs_dir.parent / "rubric.md").read_text(encoding="utf-8")
     persona = run_dir / "persona.md"  # the sheet as the run was given it; older runs fall back to the live sheet
     if not persona.exists():
         persona = cfg.runs_dir.parent / "personas" / f"{run.get('persona', '')}.md"
     parts = [("rubric.md", rubric), ("CLAUDE.md (the tutor's rules)", (Path(cfg.template) / "CLAUDE.md").read_text()),
-             ("persona sheet", persona.read_text(encoding="utf-8") if persona.exists() else "(missing)"),
-             ("facts.json", (run_dir / "facts.json").read_text() if (run_dir / "facts.json").exists() else "{}"),
-             ("transcript.md", (run_dir / "transcript.md").read_text(encoding="utf-8"))]
+             ("persona sheet", persona.read_text(encoding="utf-8") if persona.exists() else "(missing)")]
+    key = run.get("persona")
+    if (grid := inventory.column(cfg.runs_dir.parent, key)) is not None:
+        parts.append((f"placement grid for this persona ({inventory.PATH}, column {key})", inventory.as_text(grid)))
+    parts += [("facts.json", (run_dir / "facts.json").read_text() if (run_dir / "facts.json").exists() else "{}"),
+              ("transcript.md", (run_dir / "transcript.md").read_text(encoding="utf-8"))]
     return "\n\n".join(f"===== {name} =====\n{body}" for name, body in parts), rubric_items(rubric)
 
 

@@ -5,7 +5,10 @@ in the persona sheet) worked on an assignment with Claude Code, the tutor, under
 You grade the tutor's conduct against the rubric only, never the student.
 
 You are given this brief; `rubric.md`, one item per `- **ID** text` line; the template's
-`CLAUDE.md`; `facts.json`, measured from the run's records; `transcript.md`; and the persona sheet.
+`CLAUDE.md`; `facts.json`, measured from the run's records; `transcript.md`; the persona sheet; and, when the
+assignment has one, the persona's column of the placement grid (`personas/INVENTORY.md`): one line per thing the
+assignment demands, with the student's placement on it: `solid` (can use it unaided), `shaky` (has met it, will
+misuse it under pressure), `wrong` with the number of the false belief they hold, or `never` (has not met it).
 
 ## Reading the run
 
@@ -50,7 +53,12 @@ shapes exactly. Write nothing before the table.
    student's work. Answer each point with exchange numbers, or "none":
    - Register: matches the sheet's example messages, or drifts, and where.
    - Above the sheet's placement: mental arithmetic beyond two numbers; critique of the method or design of
-     Claude's code; prose of submission quality on the first try; knowledge the sheet says they lack.
+     Claude's code; prose of submission quality on the first try; knowledge the sheet says they lack. When a
+     placement grid is given, every such finding names the grid row and its placement (for example `S4 shaky`,
+     `T5 never`); a grid row id names a row of the grid, never a rubric item, even when a rubric item has the
+     same id. Knowledge shown on a `never` row is above placement. Behaviour above a placement is drift to
+     report, never a reason to raise the placement. A row marked `[draft]` or `[open ruling]` is still
+     reported, and the finding says which.
    - Wrong beliefs: which surfaced, and whether each was defended or dropped as the sheet says.
    - Ending: the student stopped the way the sheet says, or ran to the cap.
    - Any turn where the student wrote Claude's side or invented what Claude did.
