@@ -43,7 +43,9 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
  "restarts": [{"exchange": 4, "type": "exit|start|session|switch", "session": "uuid", "cwd": "...", "mode": "new|continue|picker|resume:<id>", "resumed": "uuid|null"}],
  "approvals": [{"exchange": 1, "type": "approval", "server": "name", "choice": "yes|yes_all|no", "forced": false}],
  "effort": {"tutor": {"asked": "low", "seen": ["low"]}, "student": {...}},   (seen: perTurnEffort in the session files)
- "world": {...},                                   (the world module's facts(), when it has one)
+ "world": {...},                                   (the world module's facts(), when it has one; a list under "events" of
+                                                   {"t": epoch seconds, "type": "...", ...} is shown in the viewer's
+                                                   conversation as [world] lines, placed by time)
  "config": { ...the resolved config, every key, paths as strings... }}
 ```
 `ended_by` is one of: `finished`, `left`, `max_turns`, `budget`, `timeout`, `error`, `student_silent`,

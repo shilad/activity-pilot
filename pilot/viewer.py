@@ -10,6 +10,7 @@ conversation shows.
 import hashlib
 import json
 import re
+from fnmatch import fnmatch
 from collections import Counter
 from datetime import datetime, timezone
 from html import escape
@@ -40,9 +41,18 @@ ENDED_BY = {
     "killed": "it was stopped by hand",
     "crashed": "it stopped without recording an ending",
 }
-# A student turn that is not a message to Claude carries a kind; its header names it.
+# A student turn that is not a message to Claude carries a kind; its header names it, with a side turn's label.
 KIND = {"approval": "start-up question", "terminal": "at the terminal", "picker": "resume picker",
         "side": "while Claude works"}
+# What a side turn's typed text became (turns.jsonl `sent`).
+SENT = {"queued": "sent to Claude while it worked; it saw it at its next step",
+        "next_message": "Claude had already finished, so it became the student's next message"}
+# A start-up question's answer, in the words of Claude Code's own options (pilot/terminal.py).
+CHOICES = {"yes": "Use this MCP server", "yes_all": "Use this and all future MCP servers in this project",
+           "no": "Continue without using this MCP server"}
+# How `claude` was started again from the terminal (pilot/terminal.py start_mode).
+START_MODES = {"new": "a new conversation unless the student types /resume", "continue": "claude -c: the last "
+               "conversation", "picker": "claude --resume: the conversation picker"}
 # Tones (the .tone-* classes) colour the finish marks, the grades, the command flags and the placements alike.
 MARKS = {"✓": ("good", "yes"), "✗": ("bad", "no"), "?": ("quiet", "not recorded")}
 GRADES = {"I": "bad", "P": "warn", "C": "good", "n/o": "quiet"}  # worst first, the order of the scorecard rows
@@ -67,6 +77,7 @@ SIDES = ("tutor", "student")
 TARGET_KEYS = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "skill", "description")
 SHEET_NAME = re.compile(r"#\s+(.+?)\s*(<[^>]*>)?\s*$")  # a sheet's first line: # Name <email>
 HEADING = re.compile(r"(#{1,6})\s+(.*)")
+MODEL_NAME = re.compile(r"^claude-|-\d{8}$")  # claude-haiku-4-5-20251001 is shown as haiku-4-5
 LIST_ITEM = re.compile(r"([-*+]|\d+[.)])\s+(.*)")
 
 
@@ -339,7 +350,38 @@ def _strip(r: dict) -> str:
         ("Blank slots at end", _e(f"{slots['blank_at_end']} of {slots.get('total')}")
          if slots.get("blank_at_end") is not None else "", None),
         ("Models", _e(", ".join(f"{side} {model}" for side, model in models.items() if model)), None),
+        ("Cost by model", _e(_model_costs(r)), "The tutor's session, subagents included (a grader it launched "
+                                               "runs in its session under its own model)."),
+        ("Continues", _continues(r), "pilot run --from-run: a later sitting on the same laptop, from a copy of that "
+                                     "run's repository, home folder and tutor settings."),
+        ("Scenario", _e(", ".join(run.get("scenario", {}).get("names") or []) or
+                        ("default settings" if run.get("scenario") else "")),
+         ", ".join(f"{k}={v}" for k, v in ((run.get("scenario") or {}).get("settings") or {}).items())),
+        ("Rubric", _e(run.get("rubric")), None),
+        ("Restarts of Claude Code", _e((facts.get("restarts") or {}).get("count") or ""), None),
+        ("Tutor sandbox", "on" if run.get("sandbox") else "", "Claude Code's own sandbox kept the tutor's commands "
+                                                              "inside the run's folders (pilot.toml tutor_sandbox)."),
     ])
+
+
+def _model_costs(r: dict) -> str:
+    """The tutor's cost per served model: facts.json cost_by_model, else the last model_usage in turns.jsonl."""
+    costs = ((r["facts"].get("cost_by_model") or {}).get("tutor")) or {}
+    if not costs:
+        usage = next(((t.get("result") or {}).get("model_usage") for t in reversed(r["turns"] or [])
+                      if t.get("actor") == "tutor" and (t.get("result") or {}).get("model_usage")), None) or {}
+        costs = {m: u.get("costUSD") for m, u in usage.items() if isinstance(u, dict)}
+    return " · ".join(f"{MODEL_NAME.sub('', m)} ${c:.2f}" for m, c in costs.items()
+                      if isinstance(c, (int, float)) and c >= 0.005)
+
+
+def _continues(r: dict) -> str:
+    """The earlier run this one continues, linked to its panel when it is on the page."""
+    earlier = (r["run"].get("from_run") or {}).get("run")
+    if not earlier:
+        return ""
+    return (f'<a href="#run-{_slug(earlier)}" data-run="run-{_slug(earlier)}">{_e(earlier)}</a>'
+            if r.get("linkable", set()) and earlier in r["linkable"] else _e(earlier))
 
 
 def _exchanges(r: dict) -> str:
@@ -370,10 +412,18 @@ def _alarms(r: dict) -> str:
     for key, sentence in ALARMS:
         found = r["facts"].get(key) or []
         numbers = found.get("exchanges") if isinstance(found, dict) else [item.get("exchange") for item in found]
+        numbers = list(dict.fromkeys(numbers or []))  # one mention per exchange, however many paths it named
         if numbers:
             lines.append(f"{sentence}: exchange{'s' * (len(numbers) > 1)} {', '.join(map(str, numbers))}.")
     if r["facts"].get("settings_loaded") is False:
         lines.append("The template's hooks did not run on the first exchange.")
+    if outside := r["run"].get("instructions_outside_repo"):
+        lines.append("The tutor loaded instruction files from outside its repository, so it followed more than the "
+                     f"template's rules: {', '.join(map(str, outside))}. Do not quote this run as the template's.")
+    if scrubbed := (r["run"].get("from_run") or {}).get("scrubbed"):
+        lines.append(f"This run continues {r['run']['from_run'].get('run')}, whose tutor had loaded instruction files "
+                     f"from outside its repository ({', '.join(map(str, scrubbed))}); they were removed from the "
+                     "copied conversations, but anything the tutor said about them there stays.")
     note = ('<p class="note">No facts.json in this run directory, so the figures on this page were computed from its '
             "records the way pilot report computes them.</p>") if r["summarized"] else ""
     return note + "".join(f'<p class="alarm">{_e(line)}</p>' for line in lines)
@@ -406,10 +456,59 @@ def _conversation(r: dict, index: int) -> str:
     for turn in r["turns"]:
         exchanges.setdefault(turn.get("exchange"), []).append(turn)
     stall = '<p class="line tone-warn">No progress in this exchange: no slot filled, no commit, no file changed.</p>'
+    events = _world_events(r, exchanges)
     articles = [f'<article class="exchange" id="x{index}-{_slug(number)}"><h3>Exchange {_e(number)}</h3>'
-                + "".join(map(_turn, turns)) + "".join(map(_changes, turns)) + (stall if number in stalls else "")
+                + "".join(_turn(turn) + _break(turn, r) for turn in turns) + "".join(map(_changes, turns))
+                + "".join(events.get(number, [])) + (stall if number in stalls else "")
                 + "</article>" for number, turns in exchanges.items()]
     return '<div class="thread">' + "".join(articles) + "</div>"
+
+
+def _break(turn: dict, r: dict) -> str:
+    """A visible break in the thread where Claude Code closed or started again: the turns on either side belong to
+    different Claude Code processes, and what the tutor knows after it depends on /resume."""
+    event = turn.get("event") or {}
+    if event.get("type") == "exit":
+        text = "Claude Code closed. The student is at their terminal until they start it again."
+    elif event.get("type") == "start":
+        resumed = [s for s in r["run"].get("restarts") or [] if s.get("type") == "session"
+                   and s.get("exchange") == turn.get("exchange")]
+        how = ("it reopened conversation " + str(resumed[-1]["resumed"])) if resumed and resumed[-1].get("resumed") \
+            else "a new conversation, unless the student types /resume"
+        text = f"Claude Code started again in {event.get('cwd')}: {how}."
+    elif event.get("type") == "resume_pick" and event.get("session"):
+        text = f"/resume: the tutor continues conversation {event['session']}, with its earlier messages."
+    else:
+        return ""
+    return f'<p class="break">{_e(text)}</p>'
+
+
+def _epoch(stamp) -> float | None:
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _world_events(r: dict, exchanges: dict) -> dict:
+    """The world module's events (run.json world.events: {"t": epoch seconds, "type": ...}), each placed in the
+    exchange that was under way when it happened, else the next one, as [world] lines."""
+    events = (r["run"].get("world") or {}).get("events") if isinstance(r["run"].get("world"), dict) else None
+    spans = []
+    for number, turns in exchanges.items():
+        times = [t for turn in turns for t in (_epoch(turn.get("t_start")), _epoch(turn.get("t_end"))) if t]
+        if times:
+            spans.append((number, min(times), max(times)))
+    placed = {}
+    for event in events or []:
+        if not isinstance(event, dict) or not isinstance(event.get("t"), (int, float)) or not spans:
+            continue
+        number = next((n for n, start, end in spans if start - 1 <= event["t"] <= end + 1), None) or \
+            next((n for n, start, _ in spans if start > event["t"]), spans[-1][0])
+        details = " ".join(f"{key}={value}" for key, value in event.items() if key not in ("t", "type"))
+        line = f"[world] {str(event.get('type', '')).replace('_', ' ')}" + (f": {details}" if details else "")
+        placed.setdefault(number, []).append(f'<p class="line world"><code>{_e(line[:400])}</code></p>')
+    return placed
 
 
 def _turn(turn: dict) -> str:
@@ -417,7 +516,8 @@ def _turn(turn: dict) -> str:
     commands or the tutor's tool calls; and the bracketed lines. The rest of the turn's record (session id, token
     counts, head) stays in turns.jsonl: shown under every message it doubled the page and buried the conversation."""
     actor = turn.get("actor") or "unknown"
-    who = actor.capitalize() + (f" ({KIND.get(turn['kind'], turn['kind'])})" if turn.get("kind") else "")
+    kind = KIND.get(turn.get("kind"), turn.get("kind"))
+    who = actor.capitalize() + (f" ({kind}{': ' + str(turn['label']) if turn.get('label') else ''})" if kind else "")
     timing = [f"{turn['seconds']:.1f} s"] if turn.get("seconds") is not None else []
     cost = (turn.get("result") or {}).get("total_cost_usd")
     timing += [f"session total ${cost:.2f}"] if cost is not None else []
@@ -492,7 +592,42 @@ def _fabrication_lines(fabrication: dict) -> list[str]:
 
 
 def _event_lines(event: dict) -> list[str]:
+    """An event in words where its type is known (RECORDS.md, turns.jsonl `event`); any other as key=value."""
+    kind = event.get("type")
+    if kind == "approval":
+        choice = CHOICES.get(event.get("choice"), event.get("choice"))
+        forced = "; the scenario chose it, whatever the student typed" if event.get("forced") else ""
+        return [f"[start-up question] {event.get('server')}: {choice}{forced}"]
+    if kind == "exit":
+        return ["[Claude Code closed] the student typed /exit"]
+    if kind == "start":
+        args = " ".join(event.get("args") or [])
+        how = START_MODES.get(event.get("mode"), event.get("mode"))
+        return [f"[claude{' ' + args if args else ''}] started in {event.get('cwd')}: {how}"]
+    if kind == "resume_pick":
+        picked = f"conversation {event.get('session')}" if event.get("session") else "none (Esc)"
+        return [f"[resume picker] {event.get('offered')} offered; picked {picked}"]
     return ["[event] " + " ".join(f"{key}={value}" for key, value in event.items())]
+
+
+def _queued_lines(queued: list) -> list[str]:
+    return [f"[typed while Claude worked] {item.get('text')}" for item in queued]
+
+
+def _sent_lines(sent: str) -> list[str]:
+    return [f"[typed here: {SENT.get(sent, sent)}]"]
+
+
+def _background_lines(background: dict) -> list[str]:
+    started, ended = background.get("started") or [], background.get("finished") or []
+    return [f"[background] {len(started)} started, {len(ended)} ended; the reply waited {background.get('waited_s')} s"
+            f" for them" + (f": {'; '.join(map(str, ended))}" if ended else "")]
+
+
+def _init_lines(init: dict) -> list[str]:
+    servers = ", ".join(f"{s.get('name')} ({s.get('status')})" for s in init.get("mcp_servers") or []) or "none"
+    tools = ", ".join(f"{name}: {n}" for name, n in (init.get("mcp_tools") or {}).items()) or "none yet"
+    return [f"[session start] MCP servers: {servers}; their tools listed at start: {tools}"]
 
 
 def _stop_lines(stop: str) -> list[str]:
@@ -500,12 +635,14 @@ def _stop_lines(stop: str) -> list[str]:
 
 
 # One renderer per kind of bracketed line under a turn, in the order they are shown; each takes the turn's field.
-BRACKETED = {"prompts": _prompt_lines, "asks": _ask_lines, "hooks": _hook_lines, "fabrication": _fabrication_lines,
-             "event": _event_lines, "stop": _stop_lines}
+BRACKETED = {"init": _init_lines, "prompts": _prompt_lines, "asks": _ask_lines, "queued": _queued_lines,
+             "sent": _sent_lines, "background": _background_lines, "hooks": _hook_lines,
+             "fabrication": _fabrication_lines, "event": _event_lines, "stop": _stop_lines}
 
 
 def _bracketed(turn: dict) -> str:
-    lines = [line for field, render in BRACKETED.items() if turn.get(field) for line in render(turn[field])]
+    lines = [line for field, render in BRACKETED.items() if turn.get(field) and not (field == "init" and
+             turn.get("actor") == "student") for line in render(turn[field])]  # init: the tutor's session start
     return "".join(f'<p class="line"><code>{_e(line)}</code></p>' for line in lines)
 
 
@@ -575,7 +712,8 @@ def _scorecard(r: dict, index: int) -> str:
     if card.get("cost_usd") is not None:
         graded += f" for ${card['cost_usd']:.2f}"
     if card.get("rubric_sha256"):  # 12 characters tell two rubric versions apart; scorecard.json keeps the whole hash
-        graded += f", against the rubric.md whose sha256 begins {card['rubric_sha256'][:12]}"
+        rubric = card.get("rubric") or r["run"].get("rubric") or "rubric.md"
+        graded += f", against the {rubric} whose sha256 begins {card['rubric_sha256'][:12]}"
     rows = [(f'<span class="mono">{_e(item.get("id"))}</span>',
              _tag(_e(item.get("grade")), GRADES.get(item.get("grade"), "quiet")),
              ", ".join(f'<a href="#x{index}-{_slug(n)}" data-tab="conversation">{_e(n)}</a>'
@@ -703,7 +841,10 @@ def _how_to_read(finish: str | None) -> str:
         "<p>In the conversation the student is on the right in blue and the tutor on the left in green. Under a "
         "student message are the commands the student ran in its own editor and terminal, each marked did, or failed "
         "when it came back with an error; click one for its input and output. A line in square brackets is a "
-        "permission prompt, a question Claude asked, a hook, or an event such as Claude Code being closed. The other "
+        "permission prompt, a question Claude asked, a hook, or an event such as Claude Code being closed; a ruled "
+        "line across the thread marks Claude Code closing or starting again, and a [world] line is something the "
+        "assignment's world module saw happen (a browser tab opening, a click). A student turn marked \"while Claude "
+        "works\" happened during the tutor's reply. The other "
         "tabs hold the gate's output and the writeup slots, the reader's grades, the persona sheet with the persona's "
         "column of the placement grid when the assignment has one, and every field of facts.json and run.json.</p>")
 
@@ -897,6 +1038,13 @@ summary { cursor: pointer; }
 .call { display: flex; align-items: baseline; gap: var(--space-2); font-size: var(--text-sm); }
 .call code, .line code { min-width: 0; color: var(--ink-2); }
 .line { margin: 0; font-size: var(--text-sm); }
+.line.world code { color: var(--muted); }
+/* A break across the thread: Claude Code closed, or started again. */
+.break {
+  display: flex; align-items: center; gap: var(--space-3); margin: var(--space-2) 0;
+  font-family: var(--mono); font-size: var(--text-xs); color: var(--amber);
+}
+.break::before, .break::after { content: ""; flex: 1; border-top: 1px dashed var(--amber); }
 
 /* Tags and tones: one vocabulary for the finish marks, the grades, the command flags and the placements */
 .tag {
@@ -991,15 +1139,25 @@ if (home) {
 """
 
 
+def _ignored(runs_dir: Path) -> list[str]:
+    """Run ids (or shell patterns) in runs/.viewignore, one per line, # for comments: runs left off the page."""
+    text = _read_text(runs_dir / ".viewignore") or ""
+    return [line.split("#", 1)[0].strip() for line in text.splitlines() if line.split("#", 1)[0].strip()]
+
+
 def build(cfg) -> Path:
     """Write <runs_dir>/viewer.html over every run directory in cfg.runs_dir and return its path."""
     runs_dir = Path(cfg.runs_dir)
     assignment = runs_dir.resolve().parent
-    dirs = [d for d in runs_dir.iterdir() if d.is_dir() and not d.name.startswith(".")] if runs_dir.is_dir() else []
+    skip = _ignored(runs_dir)
+    dirs = [d for d in runs_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+            and not any(fnmatch(d.name, pattern) for pattern in skip)] if runs_dir.is_dir() else []
     runs = sorted((_load(d, cfg, assignment) for d in dirs), reverse=True,
                   key=lambda r: (str(r["run"].get("started") or ""), r["id"]))
     shown = [r for r in runs if r["turns"] is not None]
-    finish = getattr(cfg, "finish_string", None)
+    for r in shown:  # an earlier run named by --from-run is a link when its panel is on the page
+        r["linkable"] = {other["id"] for other in shown}
+    finish = getattr(cfg, "finish_string", None) or getattr(cfg, "finish_pattern", None)
     title = f"Pilot runs: {_e(assignment.name)}"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     empty = "".join(f'<p class="note">{_e(r["id"])}: no turns.jsonl in this directory, so it has no panel'

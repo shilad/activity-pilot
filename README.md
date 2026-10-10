@@ -122,7 +122,12 @@ assignment repo, `runs/<run-id>/` holds `run.json`, `turns.jsonl` and `transcrip
   exchange, stalls, `tutor_left_repo`, `suspicion`, `student_saw_rules`, `persona_drift`, `student_wrote_tutor_side`.
 - **`runs/viewer.html`** (`pilot view`): all runs on one offline page, each marked by how it ended, with its
   conversation, gate and writeup slots, scorecard, student (and its column of `personas/INVENTORY.md`, when there is
-  one) and every field of `facts.json` and `run.json`.
+  one) and every field of `facts.json` and `run.json`. It also shows what restarts, worlds and the newer keys record:
+  side turns and messages typed while Claude worked, the start-up question's answer, a ruled break where Claude Code
+  closed or started again, `[world]` lines placed by time, background work, the continued run (`--from-run`, linked),
+  the scenario, the rubric, the sandbox, cost per model, and a loud warning when the tutor loaded instruction files
+  from outside its repository. Runs named in `runs/.viewignore` (one id or shell pattern per line, `#` comments)
+  are left off the page.
 - **`scorecard.md`** (`pilot read`): each rubric item graded C, P, I or n/o with its exchanges; the arc;
   stalls; a fidelity check on the student ending `Fidelity: hold | drifted | broke`; what the run could not
   show; and a `ONE LEVER:` line. Do not quote a `broke` run for anything the student did.

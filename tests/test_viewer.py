@@ -2,6 +2,7 @@
 import json
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,7 +79,8 @@ def test_build_renders_records_and_degrades(tmp_path):
         "Conversation", "Outcome", "Scorecard", "The student", "Session facts"]
 
     # The conversation: Claude Code's start-up question, the student's own commands and what it wrote to itself.
-    assert "Student (start-up question)" in html and "[event] type=approval server=notes choice=no forced=False" in html
+    assert "Student (start-up question)" in html
+    assert "[start-up question] notes: Continue without using this MCP server" in html  # the event, in words
     assert "(to self) Opening WRITEUP.md to type the number." in html
     assert ('<span class="tag tone-info">did</span><code>Edit /root/hw-work/jordan-0924-1412/toy/WRITEUP.md</code>'
             in html)
@@ -159,3 +161,76 @@ def test_session_facts_show_every_field(tmp_path):
     for record in ("facts.json", "run.json"):
         for key in json.loads((runs / JORDAN / record).read_text()):
             assert f"<dt>{key}</dt>" in facts, (record, key)
+
+
+def _hw_run(runs: Path, run_id: str, **run_fields) -> Path:
+    """A run with what restarts, approvals, side turns, background work and a world module record (no course data)."""
+    d = runs / run_id
+    d.mkdir(parents=True)
+    t = "2026-10-07T12:00:{:02d}Z".format
+
+    def turn(exchange, actor, text, second, **extra):
+        return {"exchange": exchange, "actor": actor, "text": text, "t_start": t(second), "t_end": t(second + 1),
+                "seconds": 1.0, "tools": [], "prompts": [], "hooks": [], "asks": [], "result": None, **extra}
+    usage = {"claude-opus-5-5": {"costUSD": 0.7}, "claude-sonnet-5": {"costUSD": 0.8},
+             "claude-haiku-4-5-20251001": {"costUSD": 0.001}}
+    turns = [
+        turn(1, "student", "Use this MCP server", 0, kind="approval",
+             event={"type": "approval", "server": "notes", "choice": "yes", "forced": False}),
+        turn(1, "student", "please open the notebook", 2),
+        turn(1, "student", "is Connect safe?", 4, kind="side", label="tab opened", sent="queued"),
+        turn(1, "tutor", "Opening it now. Yes, Connect is safe.", 3,
+             init={"mcp_servers": [{"name": "notes", "status": "pending"}], "mcp_tools": {}},
+             queued=[{"text": "is Connect safe?", "t": t(4)}],
+             background={"started": ["Grade batch 01"], "finished": ["Grade batch 01: completed"], "waited_s": 140.0},
+             result={"total_cost_usd": 1.5, "model_usage": usage}),
+        turn(2, "student", "/exit", 10, event={"type": "exit"}),
+        turn(3, "student", "", 12, kind="terminal",
+             event={"type": "start", "cwd": "/w/repo", "args": [], "mode": "new"}),
+        turn(3, "student", "1", 14, kind="picker", event={"type": "resume_pick", "session": "s-1", "offered": 1}),
+        turn(4, "student", "back", 16),
+        turn(4, "tutor", "Welcome back.", 17, result={"total_cost_usd": 1.6, "model_usage": usage}),
+    ]
+    (d / "turns.jsonl").write_text("".join(json.dumps(x) + "\n" for x in turns))
+    run = {"run_id": run_id, "persona": "sam-p1", "started": "2026-10-07T12:00:00Z", "status": "finished",
+           "ended_by": "left", "rubric": "rubric-p1.md", "sandbox": {"sandbox": {"enabled": True}},
+           "scenario": {"names": ["sleep"], "settings": {"sleep": "after_step2"}},
+           "restarts": [{"exchange": 2, "type": "exit"}, {"exchange": 3, "type": "start", "cwd": "/w/repo"},
+                        {"exchange": 3, "type": "session", "resumed": "s-1"}],
+           "tutor_instructions": [{"path": "/w/repo/CLAUDE.md", "type": "Project"}],
+           "world": {"events": [{"t": datetime(2026, 10, 7, 12, 0, 3, tzinfo=timezone.utc).timestamp(),
+                                 "type": "colab_tab_opened", "port": 4242}]}, **run_fields}
+    (d / "run.json").write_text(json.dumps(run))
+    (d / "scorecard.json").write_text(json.dumps({"items": [{"id": "T1", "grade": "C", "turns": [1],
+                                                             "evidence": "ok"}], "rubric": "rubric-p1.md",
+                                                  "rubric_sha256": "ab" * 32, "fidelity": "hold"}))
+    return d
+
+
+def test_hw2_style_records(tmp_path):
+    """Side turns, typed-while-working messages, the start-up question, /exit and claude again with /resume, world
+    events, background work, a continued sitting, the scenario, the rubric, the sandbox, cost per model, and loaded
+    instruction files from outside the repository, flagged."""
+    runs = tmp_path / "course" / "runs"
+    _hw_run(runs, "sam-1007-1100")
+    _hw_run(runs, "sam-1007-1200", from_run={"run": "sam-1007-1100", "scrubbed": ["/home/x/.claude/CLAUDE.md"]},
+            instructions_outside_repo=["/home/x/.claude/CLAUDE.md"])
+    (runs / ".viewignore").write_text("# kept off the page\nhidden-*\n")
+    _hw_run(runs, "hidden-1007-1300")
+    html = viewer.build(_summarizing(runs)).read_text(encoding="utf-8")
+    assert "hidden-1007-1300" not in html  # runs/.viewignore
+    assert "Student (while Claude works: tab opened)" in html
+    assert "[typed here: sent to Claude while it worked; it saw it at its next step]" in html
+    assert "[typed while Claude worked] is Connect safe?" in html
+    assert "[start-up question] notes: Use this MCP server" in html
+    assert "[Claude Code closed] the student typed /exit" in html and 'class="break"' in html
+    assert "Claude Code started again in /w/repo: it reopened conversation s-1." in html
+    assert "[resume picker] 1 offered; picked conversation s-1" in html
+    assert "[world] colab tab opened: port=4242" in html
+    assert "[background] 1 started, 1 ended; the reply waited 140.0 s" in html
+    assert "[session start] MCP servers: notes (pending)" in html
+    assert "opus-5-5 $0.70 · sonnet-5 $0.80" in html and "haiku" not in html.split("Cost by model")[1][:200]
+    assert '<a href="#run-sam-1007-1100" data-run="run-sam-1007-1100">sam-1007-1100</a>' in html
+    assert "<dd>sleep</dd>" in html and "<dd>rubric-p1.md</dd>" in html and "Tutor sandbox" in html
+    assert "against the rubric-p1.md whose sha256 begins abababababab" in html
+    assert html.count("loaded instruction files from outside its repository") >= 2  # both alarms on the second run

@@ -1169,8 +1169,8 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                 if rule:  # re-ask once and use the second reply whatever it is
                     status, detail = await ask(client, RETRY_PROMPT, turn, cfg.turn_timeout_s, finish, split=True)
         state["open_tutor"] = None
-        if not student and not state.pop("tutor_fresh", False):
-            turn.pop("init", None)  # the CLI repeats it on every turn; only a session's first is kept
+        if student or not state.pop("tutor_fresh", False):
+            turn.pop("init", None)  # the CLI repeats it on every turn; only a tutor session's first is kept
         if not student:  # the tutor may say the finish phrase in its own text: a whole line, or a bold span
             turn["finish_seen"] = turn["finish_seen"] or any(map(finish, turn["text"].splitlines()))
         prev, changes = snapshot(repo, prev, cfg)
