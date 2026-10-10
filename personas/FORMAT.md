@@ -87,3 +87,25 @@ You stop when the same error comes back a second time, or when Part 2 has taken 
 ## The default rule
 Anything not covered above, you do not know.
 ```
+
+## Optional: the placement grid (`personas/INVENTORY.md`)
+
+One file per assignment may list what the assignment demands and place every persona on each demand. The library
+reads four things from it and ignores the rest:
+- **Demand tables**: tables whose first header cell is `#`, each under a `## ` heading naming its group. A row's
+  first cell is its id (`S4`), the second says what is demanded, a column headed "Where..." says where it first
+  bites, and a column whose header contains "teaches" says whether the handout teaches it or assumes it.
+- **The grid**: one table whose header is `#` and then one persona key per column (the name `pilot run` takes). Each
+  cell is a placement: `solid` (can use it unaided), `shaky` (has met it, will misuse it under pressure), `wrong`
+  with a footnote number such as `wrong³` (holds that false belief), or `never` (has not met it). A cell ending in
+  `(draft)` has not been ruled on yet.
+- **The wrong beliefs**: a numbered list under a heading containing "wrong beliefs"; item N is footnote N, written
+  as the student would say it, with what fires it on screen, how it is defended and what changes it.
+- **Open rulings** (optional): a section of that name, one bullet per question for the instructor, starting with
+  the row id in bold and then, in parentheses, the persona keys it concerns: `- **G8** (steady): ...`. A bullet
+  that names no key concerns every column.
+
+The governing rule: a student behaving above a placement is a simulation defect to report, never a reason to raise
+the placement. Placements change only by the instructor's ruling. The viewer's student tab shows the run's persona
+column, and the reader receives it for the fidelity check and cites its row ids. Without the file, or without the
+persona's column, both work as before.

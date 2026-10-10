@@ -167,6 +167,9 @@ def report(cfg: Config) -> str                                            # mark
 def sheet(run_dir: Path, cfg: Config, initials: str) -> Path
 # pilot/viewer.py
 def build(cfg: Config) -> Path                                            # runs/viewer.html
+# pilot/inventory.py (the optional personas/INVENTORY.md, shaped as personas/FORMAT.md says)
+def column(assignment_dir: Path, key: str) -> dict | None                 # one persona's placements, or None
+def as_text(col: dict) -> str                                             # one line per row, for the reader
 # pilot/reader.py
 async def read(run_dir: Path, cfg: Config) -> Path                        # scorecard.md (+ scorecard.json)
 # pilot/cli.py
