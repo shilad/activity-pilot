@@ -714,6 +714,10 @@ def _scorecard(r: dict, index: int) -> str:
     if card.get("rubric_sha256"):  # 12 characters tell two rubric versions apart; scorecard.json keeps the whole hash
         rubric = card.get("rubric") or r["run"].get("rubric") or "rubric.md"
         graded += f", against the {rubric} whose sha256 begins {card['rubric_sha256'][:12]}"
+    if card.get("rules"):  # the tutor's CLAUDE.md the reader was shown: the run's own copy, or the template's
+        own = card["rules"] == str(Path(r["run"].get("repo") or "/nonexistent") / "CLAUDE.md")
+        graded += (", with the tutor's CLAUDE.md as this run had it" if own
+                   else f", with the tutor's CLAUDE.md from {card['rules']} (this run's copy was not found)")
     rows = [(f'<span class="mono">{_e(item.get("id"))}</span>',
              _tag(_e(item.get("grade")), GRADES.get(item.get("grade"), "quiet")),
              ", ".join(f'<a href="#x{index}-{_slug(n)}" data-tab="conversation">{_e(n)}</a>'

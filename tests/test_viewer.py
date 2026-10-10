@@ -197,13 +197,14 @@ def _hw_run(runs: Path, run_id: str, **run_fields) -> Path:
            "scenario": {"names": ["sleep"], "settings": {"sleep": "after_step2"}},
            "restarts": [{"exchange": 2, "type": "exit"}, {"exchange": 3, "type": "start", "cwd": "/w/repo"},
                         {"exchange": 3, "type": "session", "resumed": "s-1"}],
-           "tutor_instructions": [{"path": "/w/repo/CLAUDE.md", "type": "Project"}],
+           "repo": "/w/repo", "tutor_instructions": [{"path": "/w/repo/CLAUDE.md", "type": "Project"}],
            "world": {"events": [{"t": datetime(2026, 10, 7, 12, 0, 3, tzinfo=timezone.utc).timestamp(),
                                  "type": "colab_tab_opened", "port": 4242}]}, **run_fields}
     (d / "run.json").write_text(json.dumps(run))
     (d / "scorecard.json").write_text(json.dumps({"items": [{"id": "T1", "grade": "C", "turns": [1],
                                                              "evidence": "ok"}], "rubric": "rubric-p1.md",
-                                                  "rubric_sha256": "ab" * 32, "fidelity": "hold"}))
+                                                  "rubric_sha256": "ab" * 32, "fidelity": "hold",
+                                                  "rules": "/w/repo/CLAUDE.md"}))
     return d
 
 
@@ -232,5 +233,5 @@ def test_hw2_style_records(tmp_path):
     assert "opus-5-5 $0.70 · sonnet-5 $0.80" in html and "haiku" not in html.split("Cost by model")[1][:200]
     assert '<a href="#run-sam-1007-1100" data-run="run-sam-1007-1100">sam-1007-1100</a>' in html
     assert "<dd>sleep</dd>" in html and "<dd>rubric-p1.md</dd>" in html and "Tutor sandbox" in html
-    assert "against the rubric-p1.md whose sha256 begins abababababab" in html
+    assert "against the rubric-p1.md whose sha256 begins abababababab, with the tutor&#x27;s CLAUDE.md as this run had it" in html
     assert html.count("loaded instruction files from outside its repository") >= 2  # both alarms on the second run
