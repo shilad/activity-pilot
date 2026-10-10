@@ -44,7 +44,7 @@ inside a Claude Code session does not reuse it. In a Claude Code cloud container
 | Command | What it does |
 |---|---|
 | `pilot run <assignment-dir> <persona> [--repo PATH \| --from-run RUN_ID] [--turns N] [--scenario S ...] [--rubric FILE]` | One run of `personas/<persona>.md` on a fresh copy of the template, on the repo at PATH, or on a copy of an earlier run (`--from-run`: its workspace, home folder and tutor settings, with every path rewritten to the new run); at most N exchanges (default `max_turns`); each `--scenario` is a preset name from `[scenarios]` or one `key=value` setting; `--rubric` is recorded for `pilot read` |
-| `pilot read <assignment-dir> <run-id> [--rubric FILE]` | One reader call over a finished run, against the rubric given, else the one the run recorded, else `rubric.md`; writes `scorecard.md` and `scorecard.json` |
+| `pilot read <assignment-dir> <run-id> [--rubric FILE]` | One reader call over a finished run, against the rubric given, else the one the run recorded, else `rubric.md`, and the tutor's `CLAUDE.md` as the run had it (the run's repository, else the template now); writes `scorecard.md` and `scorecard.json` |
 | `pilot report <assignment-dir>` | Recomputes facts for every run and prints one Markdown table, plus agreement over filled calibration sheets |
 | `pilot view <assignment-dir>` | Writes `runs/viewer.html`, one self-contained page over every run |
 | `pilot calibrate <assignment-dir> <run-id> --initials XX` | Writes a blank grading sheet, `runs/<run-id>/sheet-XX.md` |

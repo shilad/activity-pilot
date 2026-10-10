@@ -28,14 +28,25 @@ def rubric_items(text: str) -> list[str]:
     return [m.group(1) for line in text.splitlines() if (m := ITEM_RE.match(line)) and m.group(1) != "ONE_LEVER"]
 
 
+def rules_file(run: dict, cfg) -> Path:
+    """The tutor's rules as this run had them: CLAUDE.md in the run's repository (copied from the template when the
+    run started), else the template's CLAUDE.md as it is now (the run's folder is gone, or an older run.json)."""
+    repo = run.get("repo")
+    if repo and (Path(repo) / "CLAUDE.md").is_file():
+        return Path(repo) / "CLAUDE.md"
+    return Path(cfg.template) / "CLAUDE.md"
+
+
 def materials(run_dir: Path, cfg, run: dict, rubric_file: Path | None = None) -> tuple[str, list[str]]:
-    """The user message: the rubric (`rubric_file`, else rubric.md), the template's rules, the persona sheet (and the
-    persona's column of the placement grid, when personas/INVENTORY.md has one), the facts and the transcript."""
+    """The user message: the rubric (`rubric_file`, else rubric.md), the tutor's rules as the run had them, the persona
+    sheet (and the persona's column of the placement grid, when personas/INVENTORY.md has one), the facts and the
+    transcript."""
     rubric = (rubric_file or cfg.runs_dir.parent / "rubric.md").read_text(encoding="utf-8")
     persona = run_dir / "persona.md"  # the sheet as the run was given it; older runs fall back to the live sheet
     if not persona.exists():
         persona = cfg.runs_dir.parent / "personas" / f"{run.get('persona', '')}.md"
-    parts = [("rubric.md", rubric), ("CLAUDE.md (the tutor's rules)", (Path(cfg.template) / "CLAUDE.md").read_text()),
+    rules = rules_file(run, cfg)
+    parts = [("rubric.md", rubric), ("CLAUDE.md (the tutor's rules)", rules.read_text(encoding="utf-8")),
              ("persona sheet", persona.read_text(encoding="utf-8") if persona.exists() else "(missing)")]
     key = run.get("persona")
     if (grid := inventory.column(cfg.runs_dir.parent, key)) is not None:
@@ -97,8 +108,9 @@ async def read(run_dir: Path, cfg, rubric: str | None = None) -> Path:
         prompt = text + "\n\n" + RETRY.format(missing=", ".join(parsed["missing"]))
     (run_dir / "scorecard.md").write_text(card, encoding="utf-8")
     rubric_sha = hashlib.sha256(rubric_file.read_bytes()).hexdigest()
+    rules = rules_file(run, cfg)
     result = {"cost_usd": round(total, 4), "model": model, "valid": not parsed["missing"], "rubric": rubric_file.name,
-              "rubric_sha256": rubric_sha,
+              "rubric_sha256": rubric_sha, "rules": str(rules), "rules_sha256": hashlib.sha256(rules.read_bytes()).hexdigest(),
               **parsed}
     (run_dir / "scorecard.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
     return run_dir / "scorecard.md"

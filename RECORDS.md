@@ -18,7 +18,7 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
 | `run.log` | stderr of both CLI processes, appended as it arrives | run.py |
 | `gate.txt` | end: first line `exit <code>` (or `exit timeout`), then the gate command's output | run.py |
 | `facts.json` | end, in a guarded block; regenerable by `pilot report` | facts.py |
-| `scorecard.md`, `scorecard.json` | `pilot read`; `scorecard.json` is `{"cost_usd": float, "model": str, "fidelity": "hold|drifted|broke", "one_lever": str, "items": [{"id": str, "grade": "C|P|I|n/o", "turns": [int], "evidence": str}]}` | reader.py |
+| `scorecard.md`, `scorecard.json` | `pilot read`; `scorecard.json` is `{"cost_usd": float, "model": str, "valid": bool, "rubric": str, "rubric_sha256": str, "rules": str (the CLAUDE.md read), "rules_sha256": str, "missing": [str], "fidelity": "hold|drifted|broke", "one_lever": str, "items": [{"id": str, "grade": "C|P|I|n/o", "turns": [int], "evidence": str}]}` | reader.py |
 | `sheet-<initials>.md` | `pilot calibrate` | facts.py |
 | `../viewer.html` (in `runs/`) | `pilot view` | viewer.py |
 

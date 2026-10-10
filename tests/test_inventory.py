@@ -65,6 +65,17 @@ def test_reader_materials_carry_the_grid(tmp_path):
     assert "placement grid" not in reader.materials(run_dir, cfg, {"persona": "jordan"})[0]
 
 
+def test_reader_uses_the_rules_the_run_had(tmp_path):
+    """The tutor's rules come from the run's own repository, not from a template edited since."""
+    cfg = SimpleNamespace(template=HERE / "toy" / "template")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert reader.rules_file({"repo": str(repo)}, cfg) == cfg.template / "CLAUDE.md"
+    (repo / "CLAUDE.md").write_text("# rules as the run had them\n", encoding="utf-8")
+    assert reader.rules_file({"repo": str(repo)}, cfg) == repo / "CLAUDE.md"
+    assert reader.rules_file({}, cfg) == cfg.template / "CLAUDE.md"
+
+
 
 def test_a_later_sitting_uses_the_same_students_column(tmp_path):
     """jordan-p1 has no column; jordan.md names the same student, so jordan's column is used."""
