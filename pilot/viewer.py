@@ -578,8 +578,8 @@ def _scorecard(r: dict, index: int) -> str:
     graded = f"Graded by {card.get('model') or 'an unrecorded model'}"
     if card.get("cost_usd") is not None:
         graded += f" for ${card['cost_usd']:.2f}"
-    if card.get("rubric_sha256"):
-        graded += f", against rubric.md with sha256 {card['rubric_sha256']}"
+    if card.get("rubric_sha256"):  # 12 characters tell two rubric versions apart; scorecard.json keeps the whole hash
+        graded += f", against the rubric.md whose sha256 begins {card['rubric_sha256'][:12]}"
     rows = [(f'<span class="mono">{_e(item.get("id"))}</span>',
              _tag(_e(item.get("grade")), GRADES.get(item.get("grade"), "quiet")),
              ", ".join(f'<a href="#x{index}-{_slug(n)}" data-tab="conversation">{_e(n)}</a>'
@@ -874,8 +874,10 @@ summary { cursor: pointer; }
 }
 .exchange h3, .turn header {
   display: flex; gap: var(--space-2); margin: 0;
-  font-family: var(--mono); font-size: var(--text-xs); text-transform: uppercase; color: var(--muted);
+  font-family: var(--mono); font-size: var(--text-xs); color: var(--muted);
 }
+/* Capitals for the labels only: a timing such as "1.3 s" must keep its lower-case unit. */
+.exchange h3, .who { text-transform: uppercase; }
 .turn { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); }
 .turn > * { max-width: var(--bubble-width); min-width: 0; }
 .turn-student { align-items: flex-end; }
