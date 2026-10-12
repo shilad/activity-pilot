@@ -125,6 +125,8 @@ class Config:
     slot_marker: str = "XXXX"
     part_heading: str = r"^## Part (\d+)"
     max_turns: int = 40
+    student_max_turns: int = STUDENT_MAX_TURNS  # the SDK's max_turns for one student message; a page that
+    # takes many clicks in one message (a review queue, a rating page) needs more
     max_usd: float = 15.0
     turn_timeout_s: int = 1800
     fixed_minutes: int = 15
@@ -790,7 +792,7 @@ def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stde
     return ClaudeAgentOptions(system_prompt=prompt or persona["prompt"], setting_sources=[],
                               allowed_tools=tools + list(extra_tools), mcp_servers=servers or {},
                               disallowed_tools=[t for t in OTHER_TOOLS + ["Bash"] if t not in tools],
-                              hooks={"PreToolUse": [HookMatcher(hooks=[hook])]}, max_turns=STUDENT_MAX_TURNS,
+                              hooks={"PreToolUse": [HookMatcher(hooks=[hook])]}, max_turns=cfg.student_max_turns,
                               model=cfg.student_model or None, effort=cfg.student_effort or None,
                               env={**base, **(env or {})}, **common)
 

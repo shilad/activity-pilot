@@ -71,6 +71,7 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | `finish_string` | `YOU ARE FINISHED!` | matched in untruncated tool results and gate output only |
 | `writeup`, `slot_marker`, `part_heading` | `WRITEUP.md`, `XXXX`, `^## Part (\d+)` | slot convention |
 | `max_turns` | 40 | exchanges; never passed to the SDK's `max_turns` |
+| `student_max_turns` | 12 | the SDK's `max_turns` for one student message (its tool calls); reaching it ends the run as `student_loop`. Raise it when one message takes many clicks, such as a review queue |
 | `max_usd` | 15 | run cap on tutor plus student by last totals; also `max_budget_usd` per client |
 | `turn_timeout_s` | 1800 | per actor turn, and for setup and gate |
 | `fixed_minutes` | 15 | minutes the record cannot see |

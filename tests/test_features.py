@@ -96,6 +96,16 @@ def test_config_keys(tmp_path):
         run.load_config(_assignment(tmp_path / "c", 'slot_heading = "^#### (.+)$"\n', "# W\n\n## Part 1\n\nnone\n"))
 
 
+def test_student_max_turns(tmp_path):
+    assert run.load_config(_assignment(tmp_path / "a", "")).student_max_turns == run.STUDENT_MAX_TURNS
+    cfg = run.load_config(_assignment(tmp_path / "b", "student_max_turns = 150\n"))
+    sb = {"config_dirs": {"student": None, "tutor": None}, "repo": tmp_path}
+    opts = run.options(cfg, sb, {"prompt": "x"}, "student", None, None)
+    assert (cfg.student_max_turns, opts.max_turns) == (150, 150)
+    with pytest.raises(run.ConfigError, match="student_max_turns"):
+        run.load_config(_assignment(tmp_path / "c", 'student_max_turns = "many"\n'))
+
+
 def test_token_file_is_read_and_redacted(tmp_path, monkeypatch):
     token = "tok-" + "x" * 40
     (tmp_path / "token").write_text(token + "\n")
