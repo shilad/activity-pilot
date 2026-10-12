@@ -688,9 +688,7 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
         command = str(inp.get("command", ""))
         if unsandboxed_ok(command, tuple(cfg.sandbox_retry), roots, repo) is not None:
             return {}
-        if state.get("tutor_turn") is not None and not re.fullmatch(r"\s*git\b[^|;&]*", command):
-            state["tutor_turn"]["prompts"].append({"tool": "Bash", "summary": _summary(inp), "decision": "allow",
-                                                   "reason": "outside the sandbox: stays in this run"})
+        # Claude Code still asks for a command marked to run outside; tutor_tool records that ask and allows it.
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                        "updatedInput": {**inp, "dangerouslyDisableSandbox": True}}}
 

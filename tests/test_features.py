@@ -220,7 +220,7 @@ def test_unsandboxed_retry_policy(tmp_path):
 
 def test_tutor_hook_runs_safe_commands_outside(tmp_path):
     """The tutor's pre-command hook marks a command that stays in the run to run outside the sandbox (so a merge
-    can write .claude/), leaves others sandboxed, and notes it in the turn's prompts."""
+    can write .claude/), and leaves others sandboxed."""
     ws = tmp_path / "ws"
     repo = ws / "repo"
     repo.mkdir(parents=True)
@@ -232,7 +232,6 @@ def test_tutor_hook_runs_safe_commands_outside(tmp_path):
         return asyncio.run(hook({"tool_name": "Bash", "tool_input": {"command": command}}, "t1", None))
     out = call("git merge upstream/main --no-edit 2>&1 | tail -3")
     assert out["hookSpecificOutput"]["updatedInput"]["dangerouslyDisableSandbox"] is True
-    assert state["tutor_turn"]["prompts"][-1]["reason"] == "outside the sandbox: stays in this run"
     assert call("ls /Users") == {} and call("find . -name x") == {}
     state["sandbox_roots"] = []
     assert call("git status") == {}
