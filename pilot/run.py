@@ -150,6 +150,7 @@ class Config:
     restarts: bool = False  # the student may /exit Claude Code, use their terminal, and start it again with `claude`
     world: str = ""  # the assignment's world module (see pilot/world.py), relative to the assignment directory
     tutor_sandbox: bool = False  # Claude Code's own sandbox for the tutor's commands: no reading outside the run
+    sandbox_excluded: tuple = ("git:*",)  # commands (prefix patterns) the tutor's sandbox runs outside it
     tell_date: bool = False  # tell the student today's real date, so a sheet's story date is not argued with
     template_updates: bool = True  # --from-run: the template's commits since the earlier run reach the upstream
     settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
@@ -685,9 +686,11 @@ def sandbox_settings(cfg, sb: dict, extra: dict | None = None) -> dict:
     rules = [f"{tool}(/{p}/**)" for p in map(str, others) for tool in ("Read", "Edit")]
     return {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False, "allowUnsandboxedCommands": False,
                         # The sandbox never lets a command write .git/config, which `git remote` (and a chain such
-                        # as `git remote add ... && git fetch ...`) must, so git runs outside it. Checked: reads
-                        # outside the run still fail for git (`git -C <denied folder> log`: Operation not permitted).
-                        "excludedCommands": ["git:*"],
+                        # as `git remote add ... && git fetch ...`) must, nor .claude/agents, .claude/skills or
+                        # .claude/settings.json, which merging a template update may change; so git runs outside it
+                        # (sandbox_excluded; an assignment adds a command its rules make the tutor chain before
+                        # git). Checked: reads outside the run still fail for git (`git -C <denied folder> log`).
+                        "excludedCommands": list(cfg.sandbox_excluded),
                         "filesystem": {"denyRead": [str(homes), str(cfg.work_dir)],
                                        "allowRead": mine + list(extra.get("allowRead", [])),
                                        "allowWrite": mine + list(extra.get("allowWrite", []))},

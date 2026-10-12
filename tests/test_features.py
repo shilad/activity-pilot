@@ -176,7 +176,7 @@ def test_sandbox_settings(tmp_path, monkeypatch):
     wd = homes / "Shared" / "hw-work"
     for d in ("me-1", "older-1", ".home/me-1", ".home/older-1", ".cache"):
         (wd / d).mkdir(parents=True)
-    cfg = SimpleNamespace(work_dir=wd)
+    cfg = SimpleNamespace(work_dir=wd, sandbox_excluded=("git:*",))
     got = run.sandbox_settings(cfg, {"run_id": "me-1", "workspace": wd / "me-1"}, {"allowUnixSockets": ["/x.sock"]})
     sb = got["sandbox"]
     assert sb["enabled"] and sb["autoAllowBashIfSandboxed"] is False and sb["allowUnsandboxedCommands"] is False
@@ -188,6 +188,9 @@ def test_sandbox_settings(tmp_path, monkeypatch):
     for p in (homes / "someone", homes / "other", wd / "older-1", wd / ".home" / "older-1"):
         assert f"Read(/{p}/**)" in deny and f"Edit(/{p}/**)" in deny, p
     assert not any("me-1" in r or r.endswith("Shared/**)") for r in deny)
+    cfg.sandbox_excluded = ["git:*", "python3 dump_transcript.py:*"]  # a command chained before git in a template
+    assert run.sandbox_settings(cfg, {"run_id": "me-1", "workspace": wd / "me-1"})["sandbox"]["excludedCommands"] == [
+        "git:*", "python3 dump_transcript.py:*"]
 
 
 def test_tell_date_and_sandbox_needs_home(tmp_path):
