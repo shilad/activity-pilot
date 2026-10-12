@@ -176,10 +176,11 @@ def test_sandbox_settings(tmp_path, monkeypatch):
     wd = homes / "Shared" / "hw-work"
     for d in ("me-1", "older-1", ".home/me-1", ".home/older-1", ".cache"):
         (wd / d).mkdir(parents=True)
-    cfg = SimpleNamespace(work_dir=wd, sandbox_excluded=("git:*",))
+    cfg = SimpleNamespace(work_dir=wd, sandbox_excluded=("git:*",), sandbox_retry=())
     got = run.sandbox_settings(cfg, {"run_id": "me-1", "workspace": wd / "me-1"}, {"allowUnixSockets": ["/x.sock"]})
     sb = got["sandbox"]
     assert sb["enabled"] and sb["autoAllowBashIfSandboxed"] is False and sb["allowUnsandboxedCommands"] is False
+    # (no sandbox_retry here: nothing may leave the sandbox)
     assert sb["excludedCommands"] == ["git:*"]
     assert sb["filesystem"]["denyRead"] == [str(homes), str(wd)]
     assert sb["filesystem"]["allowRead"] == [str(wd / "me-1"), str(wd / ".home" / "me-1"), str(wd / ".cache")]
@@ -197,3 +198,20 @@ def test_tell_date_and_sandbox_needs_home(tmp_path):
     assert "{date}" in run.TODAY
     with pytest.raises(run.ConfigError, match="run_home"):
         run.load_config(_assignment(tmp_path, "tutor_sandbox = true\n"))
+
+
+def test_unsandboxed_retry_policy(tmp_path):
+    """A command the sandbox blocked may run outside it only with listed programs and paths inside the run."""
+    run_dir = tmp_path / "ws" / "run-1"
+    repo = run_dir / "repo"
+    repo.mkdir(parents=True)
+    roots, allowed = [run_dir.resolve()], run.Config.sandbox_retry
+    ok = lambda c: run.unsandboxed_ok(c, allowed, roots, repo)  # noqa: E731
+    for good in ("git merge upstream/main 2>&1 | tail -15", "git diff --name-only HEAD upstream/main; echo ---; "
+                 "git merge upstream/main", "python3 dump_transcript.py 2>&1 | tail -3; git merge upstream/main",
+                 f"git -C {repo} status", "git log --oneline -5 && git status --short", "cat .claude/settings.json"):
+        assert ok(good) is None, good
+    for bad, why in (("find / -name x", "find"), ("cat /etc/passwd", "outside"), ("git -C /Users/someone log", "outside"),
+                     ("ls ~/../../", "outside"), ("cat $HOME/x", "expands"), ("git log `whoami`", "expands"),
+                     ("rm -rf .claude", "rm"), ("tail -5 ../../other/file", "outside")):
+        assert why in (ok(bad) or ""), bad

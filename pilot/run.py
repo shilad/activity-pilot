@@ -151,6 +151,9 @@ class Config:
     world: str = ""  # the assignment's world module (see pilot/world.py), relative to the assignment directory
     tutor_sandbox: bool = False  # Claude Code's own sandbox for the tutor's commands: no reading outside the run
     sandbox_excluded: tuple = ("git:*",)  # commands (prefix patterns) the tutor's sandbox runs outside it
+    sandbox_retry: tuple = ("git", "echo", "tail", "head", "wc", "grep", "sort", "uniq", "cat", "ls", "pwd", "true")
+    # programs a command may use when Claude Code asks to run it outside the sandbox after the sandbox blocked it;
+    # its paths must stay in the run's folders. Empty: no command ever leaves the sandbox.
     tell_date: bool = False  # tell the student today's real date, so a sheet's story date is not argued with
     template_updates: bool = True  # --from-run: the template's commits since the earlier run reach the upstream
     settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
@@ -642,6 +645,15 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
 
     async def tutor_tool(name, inp, context):
         turn = state["tutor_turn"]
+        if name == "Bash" and (inp or {}).get("dangerouslyDisableSandbox"):  # the sandbox blocked it; leave only if safe
+            roots = [Path(r).resolve() for r in state.get("sandbox_roots", [])]
+            why = unsandboxed_ok(str(inp.get("command", "")), tuple(cfg.sandbox_retry), roots, repo) \
+                if roots and cfg.sandbox_retry else "nothing may run outside the sandbox"
+            turn["prompts"].append({"tool": name, "summary": _summary(inp), "decision": "deny" if why else "allow",
+                                    "reason": f"outside the sandbox: {why or 'stays in this run'}"})
+            if why:
+                return PermissionResultDeny(message=f"Not allowed to run outside the sandbox: {why}.")
+            return PermissionResultAllow()  # this command only; no rule is remembered
         if name != "AskUserQuestion":
             turn["prompts"].append({"tool": name, "summary": _summary(inp), "decision": "allow",
                                     "reason": context.decision_reason or ""})
@@ -667,6 +679,45 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
     return tutor_tool, student_tool, student_hook
 
 
+def unsandboxed_ok(command: str, allowed: tuple, roots: list[Path], cwd: Path) -> str | None:
+    """Whether a command the sandbox blocked may run outside it: None when it may, else why not. It may when every
+    part (split at |, ;, && and ||) starts with a program in `allowed` (or `python3 dump_transcript.py`), it expands
+    nothing ($, backticks) and every path in it resolves inside `roots`, e.g. `git merge upstream/main 2>&1 | tail`."""
+    if any(c in command for c in ("$", "`", "<(", ">(")):
+        return "it expands a variable or runs a command inside the command"
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return "it could not be read"
+    parts, part = [], []
+    for t in tokens:
+        if t and set(t) <= set(";&|"):
+            parts.append(part)
+            part = []
+        else:
+            part.append(t)
+    parts.append(part)
+    for words in filter(None, parts):
+        words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)] or words  # VAR=x cmd
+        prog = Path(words[0]).name
+        if not (prog in allowed or (prog in ("python3", "python") and len(words) > 1
+                                    and Path(words[1]).name == "dump_transcript.py")):
+            return f"{prog} is not one of the programs allowed outside the sandbox here"
+    for t in tokens:
+        if t.startswith("-") or not ("/" in t or t.startswith("~") or t == ".."):
+            continue
+        if re.match(r"^[a-z][a-z0-9+.-]*://", t) or re.fullmatch(r"[\w.-]+/[\w.-]+", t) and not Path(cwd, t).exists() \
+                and "." not in t.split("/")[0]:
+            continue  # an address, or a branch like upstream/main
+        path = Path(t).expanduser()
+        path = (path if path.is_absolute() else cwd / path).resolve()
+        if not any(path == r or r in path.parents for r in roots):
+            return f"{t} is outside this run's folders"
+    return None
+
+
 def sandbox_settings(cfg, sb: dict, extra: dict | None = None) -> dict:
     """Settings for Claude Code's own sandbox (macOS Seatbelt, Linux bubblewrap), passed with the SDK's settings
     option (the CLI's --settings), never written into the repository. The tutor's commands may not read any home
@@ -684,7 +735,9 @@ def sandbox_settings(cfg, sb: dict, extra: dict | None = None) -> dict:
     others += [d for parent in (cfg.work_dir, cfg.work_dir / ".home") if parent.is_dir() for d in sorted(parent.iterdir())
                if d.is_dir() and d.resolve() not in keep and d.name not in (".home", ".cache")]
     rules = [f"{tool}(/{p}/**)" for p in map(str, others) for tool in ("Read", "Edit")]
-    return {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False, "allowUnsandboxedCommands": False,
+    return {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False,
+                        # A blocked command may ask to run outside; unsandboxed_ok() answers that request.
+                        "allowUnsandboxedCommands": bool(getattr(cfg, "sandbox_retry", ())),
                         # The sandbox never lets a command write .git/config, which `git remote` (and a chain such
                         # as `git remote add ... && git fetch ...`) must, nor .claude/agents, .claude/skills or
                         # .claude/settings.json, which merging a template update may change; so git runs outside it
@@ -1159,6 +1212,7 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
             error = f"world module failed to start: {type(e).__name__}: {e}"[:1000]
     if cfg.tutor_sandbox:
         sb["sandbox"] = run["sandbox"] = sandbox_settings(cfg, sb, call(world, "tutor_sandbox", {}))
+        state["sandbox_roots"] = sb["sandbox"]["sandbox"]["filesystem"]["allowWrite"]  # where a retry may reach
         _write_json(run_dir / "run.json", run)
     wenv = dict(call(world, "tutor_env", {}) or {})
     wpath = wenv.pop("PATH", []) or []
