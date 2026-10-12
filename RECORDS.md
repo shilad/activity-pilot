@@ -42,6 +42,11 @@ and `-N` only if that id already exists (chosen by exclusive `mkdir` of the run 
  "tutor_sessions": ["uuid", "..."],                (every tutor session id, in order; a resumed one appears once)
  "restarts": [{"exchange": 4, "type": "exit|start|session|switch", "session": "uuid", "cwd": "...", "mode": "new|continue|picker|resume:<id>", "resumed": "uuid|null"}],
  "approvals": [{"exchange": 1, "type": "approval", "server": "name", "choice": "yes|yes_all|no", "forced": false}],
+ "from_run": null | {"run": "<earlier run id>", "copied": ["/abs/..."], "scrubbed": ["/abs/.../CLAUDE.md"],
+              "template_update": {"from": "sha", "to": "sha", "upstream": "/abs/...git",
+                                  "commits": [{"sha": "new sha on the upstream", "template": "sha", "subject": "..."}]}},
+                                                   (template_update: the template's commits since the earlier run's,
+                                                   added to the copy's upstream; "note" or "error" when none could be)
  "effort": {"tutor": {"asked": "low", "seen": ["low"]}, "student": {...}},   (seen: perTurnEffort in the session files)
  "world": {...},                                   (the world module's facts(), when it has one; a list under "events" of
                                                    {"t": epoch seconds, "type": "...", ...} is shown in the viewer's

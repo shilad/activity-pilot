@@ -67,7 +67,7 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | `template` | required | path to the template checkout; `git archive HEAD` exported, commit recorded |
 | `work_dir` | `/Users/Shared/hw-work` on macOS, `/var/tmp/hw-work` elsewhere | workspaces and config dirs, created readable by you only; refused if it contains sim, pilot, harness or persona, or if any folder above it holds files Claude Code would load as the tutor's own instructions (below) |
 | `setup` | `""` | command run in the repo before exchange 1, timed; empty means the tutor does it |
-| `gate` | `uv run python run_all.py` | run once at the end with a timeout |
+| `gate` | `uv run python run_all.py` | run once at the end with a timeout; it gets `PILOT_RUN_ID`, `PILOT_PERSONA` and `PILOT_RUBRIC` (the run's rubric file name), so one gate can check the part a run was for |
 | `finish_string` | `YOU ARE FINISHED!` | matched in untruncated tool results and gate output only |
 | `writeup`, `slot_marker`, `part_heading` | `WRITEUP.md`, `XXXX`, `^## Part (\d+)` | slot convention |
 | `max_turns` | 40 | exchanges; never passed to the SDK's `max_turns` |
@@ -94,6 +94,7 @@ To check a machine end to end: `uv run pilot run tests/toy jordan` (Haiku on bot
 | `world` | `""` | the assignment's world module (`pilot/world.py` documents it), relative to the assignment directory |
 | `tutor_sandbox` | false | Claude Code's own sandbox for the tutor's commands (macOS Seatbelt), set through the SDK's settings option, never in the repository: no command may read any home folder or another run; this run's workspace, home and settings folders and the shared caches stay readable and writable; network and local servers stay open; nothing is auto-approved, so permission prompts are unchanged. git commands run outside it (the sandbox never lets a command write `.git/config`, which `git remote` needs); reads outside the run still fail for them. The Read, Edit and Write tools get the same limits as deny rules. A refused read shows as "Operation not permitted" or "denied by sandbox". Needs `run_home` |
 | `tell_date` | false | tell the student today's real date, so a sheet's story date does not contradict the tutor's clock |
+| `template_updates` | true | `--from-run` after the template moved: the template's commits since the earlier run's are added to the copy's upstream (the library's `upstream.git`, or a world's GitHub stand-in under `<workspace>/github`), one commit each with its own subject, so the tutor's usual `git fetch upstream` finds them and `git merge upstream/main` brings them in, as an instructor's push would; recorded in run.json under `from_run.template_update` |
 | `[settings]`, `[scenarios.<name>]` | none | per-run settings with their defaults, and named presets of them; chosen with `--scenario`, recorded in `run.json`, given to the world |
 
 The smallest `pilot.toml` is `template = "<path>"`; a relative path is taken from the assignment directory, as

@@ -294,3 +294,41 @@ def test_a_background_server_is_not_waited_for(tmp_path, monkeypatch):
     turns = [t for t in facts.load_turns(out) if t["actor"] == "tutor"]
     assert turns[0]["background"]["waited_s"] < 5 and "background" not in turns[1]  # waited once, briefly
     assert turns[1]["text"] == "Reply to next"
+
+
+def test_from_run_brings_a_template_update(tmp_path):
+    """--from-run after the template moved: the template's new commits reach the copy's upstream, and run.json
+    records them; the student's tutor finds them with the usual fetch."""
+    course = _assignment(tmp_path)
+    with open(course / "pilot.toml", "a") as f:
+        f.write('upstream_url = "https://example.edu/course.git"\n')
+    cfg = run.load_config(course)
+
+    def leave(env, tools, cwd):
+        return ScriptedStudent(lambda p, st: [("say", "Use this MCP server" if "New MCP" in p else "bye\n(leaves)")],
+                               env=env, tools=tools, cwd=cwd)
+    first = run.run_one(cfg, "jordan", tutor=FakeTutor, student=leave)
+    tpl = cfg.template
+    (tpl / "part2.md").write_text("Part 2\n")
+    for args in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "Part 2 text"]):
+        subprocess.run(["git", "-C", str(tpl), *args], check=True)
+    second = run.run_one(cfg, "jordan", from_run=first.name, tutor=FakeTutor, student=leave)
+    new = json.loads((second / "run.json").read_text())
+    update = new["from_run"]["template_update"]
+    assert [c["subject"] for c in update["commits"]] == ["Part 2 text"] and update["upstream"].endswith("upstream.git")
+    repo = Path(new["repo"])
+    subprocess.run(["git", "-C", str(repo), "fetch", "-q", cfg.upstream_url, "main"], check=True)
+    assert subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s", "FETCH_HEAD"], capture_output=True,
+                          text=True).stdout.strip() == "Part 2 text"
+
+
+def test_gate_knows_the_run(tmp_path):
+    """The gate gets the run's id, persona and rubric file, so one gate can check the part a run was for."""
+    course = _assignment(tmp_path)
+    toml = (course / "pilot.toml").read_text().replace('gate = ""', 'gate = \'echo "$PILOT_RUN_ID $PILOT_PERSONA $PILOT_RUBRIC"\'')
+    (course / "pilot.toml").write_text(toml)
+    cfg = run.load_config(course)
+    out = run.run_one(cfg, "jordan", tutor=FakeTutor, student=lambda env, tools, cwd: ScriptedStudent(
+        lambda p, st: [("say", "Use this MCP server" if "New MCP" in p else "bye\n(leaves)")], env=env, tools=tools,
+        cwd=cwd))
+    assert (out / "gate.txt").read_text() == f"exit 0\n{out.name} jordan rubric.md\n"

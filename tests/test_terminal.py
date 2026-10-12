@@ -138,3 +138,43 @@ def test_load_world(tmp_path):
     asyncio.run(world.call(w, "start"))
     assert world.call(w, "tutor_env") == {"BROWSER": "x", "PATH": ["/a"]} and logged == ["started 7"]
     assert world.call(w, "student_tools", []) == [] and world.call(None, "facts") is None
+
+
+def test_replay_template(tmp_path):
+    """A template update reaches a run: the template's later commits land on the upstream's main, one by one, with
+    their subjects, and the student's merge keeps their own work."""
+    tpl, student = tmp_path / "tpl", tmp_path / "student"
+
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.name=i", "-c", "user.email=i@e", *args],
+                              capture_output=True, text=True, check=True).stdout
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tpl)], check=True)
+    (tpl / "WRITEUP.md").write_text("## Part 1\nXXXX\n\n## Part 2\n[TBD]\n")
+    git(tpl, "add", "-A")
+    git(tpl, "commit", "-q", "-m", "Part 1 template")
+    first = git(tpl, "rev-parse", "HEAD").strip()
+    shutil.copytree(tpl, student, ignore=shutil.ignore_patterns(".git"))  # a run's copy: the files, a new history
+    subprocess.run(["git", "init", "-q", "-b", "main", str(student)], check=True)
+    git(student, "add", "-A")
+    git(student, "commit", "-q", "-m", "Initial commit")
+    bare = github.add_repo(tmp_path / "github", "shilad", "course", student)
+    (student / "WRITEUP.md").write_text("## Part 1\nmy answer\n\n## Part 2\n[TBD]\n")
+    git(student, "commit", "-qam", "Part 1 done")
+    (tpl / "WRITEUP.md").write_text("## Part 1\nXXXX\n\n## Part 2\nXXXX\n")
+    (tpl / "part2.md").write_text("Part 2\n")
+    git(tpl, "add", "-A")
+    git(tpl, "commit", "-q", "-m", "Part 2 text")
+    (tpl / "part2.md").write_text("Part 2, trimmed\n")
+    git(tpl, "commit", "-qam", "Trim Part 2")
+    added = github.replay_template(bare, tpl, first)
+    assert [a["subject"] for a in added] == ["Part 2 text", "Trim Part 2"]
+    assert github.replay_template(bare, tpl, git(tpl, "rev-parse", "HEAD").strip()) == []  # nothing new
+    git(student, "remote", "add", "upstream", str(bare))
+    git(student, "fetch", "-q", "upstream")
+    assert git(student, "log", "--format=%s", "HEAD..upstream/main").split("\n")[:2] == ["Trim Part 2", "Part 2 text"]
+    git(student, "merge", "-q", "--no-edit", "upstream/main")
+    assert (student / "WRITEUP.md").read_text() == "## Part 1\nmy answer\n\n## Part 2\nXXXX\n"
+    assert (student / "part2.md").read_text() == "Part 2, trimmed\n"
+    other = github.add_repo(tmp_path / "github", "shilad", "other", student)
+    one = github.replay_template(other, tpl, "0" * 40)  # an unknown starting point: one commit, the template's tree
+    assert [a["subject"] for a in one] == ["Trim Part 2"]

@@ -16,6 +16,8 @@ from claude_agent_sdk import (AssistantMessage, CanUseToolShadowedWarning, Claud
                               SystemMessage, TaskNotificationMessage, TaskStartedMessage, TaskUpdatedMessage, TextBlock,
                               ToolResultBlock, ToolUseBlock, UserMessage)
 
+from . import github
+
 STUDENT_TAIL_LINES = 8  # tool output lines per tool call in the tutor's reply as the student sees it (fallback view)
 STUDENT_MAX_TURNS = 12  # the SDK's max_turns per student message; reaching it ends the run as student_loop
 LEAK_WORDS = ("sim", "pilot", "harness", "persona")  # never allowed in a path the tutor can see
@@ -148,6 +150,7 @@ class Config:
     world: str = ""  # the assignment's world module (see pilot/world.py), relative to the assignment directory
     tutor_sandbox: bool = False  # Claude Code's own sandbox for the tutor's commands: no reading outside the run
     tell_date: bool = False  # tell the student today's real date, so a sheet's story date is not argued with
+    template_updates: bool = True  # --from-run: the template's commits since the earlier run reach the upstream
     settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
     scenarios: dict = field(default_factory=dict)  # named presets, [scenarios.<name>] tables of settings
 
@@ -353,6 +356,34 @@ def munged(path) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
+def _upstream_bare(ws: Path, repo: Path) -> Path | None:
+    """The bare repository the copy's `upstream` remote reaches: the library's own (upstream_url) or one a world
+    serves as GitHub under <workspace>/github (pilot.github's layout)."""
+    if (ws / "upstream.git").is_dir():
+        return ws / "upstream.git"
+    url = _git(repo, "remote", "get-url", "upstream", check=False).strip()
+    path = github.local_path(ws / "github", url) if url else None
+    return path if path and path.is_dir() else None
+
+
+def _template_update(cfg: Config, ws: Path, repo: Path, old_run: str) -> dict:
+    """A later sitting after the template moved: its new commits go to the upstream the student's tutor checks at
+    the start of a session, as an instructor's push to the class repository would. Recorded in run.json."""
+    old = {}
+    with contextlib.suppress(OSError, ValueError):
+        old = json.loads((cfg.runs_dir / old_run / "run.json").read_text(encoding="utf-8"))
+    since = (old.get("template") or {}).get("commit")
+    head = _git(cfg.template, "rev-parse", "HEAD").strip()
+    bare = _upstream_bare(ws, repo)
+    if bare is None:
+        return {"from": since, "to": head, "commits": [], "note": "no upstream remote to update"}
+    try:
+        added = github.replay_template(bare, cfg.template, since)
+    except RuntimeError as e:
+        return {"from": since, "to": head, "commits": [], "error": str(e)}
+    return {"from": since, "to": head, "upstream": str(bare), "commits": added}
+
+
 def _copy_run(old_ws: Path, old_root: Path, new_ws: Path, new_root: Path) -> list[str]:
     """Copy an earlier run's workspace and its tutor settings and home folder (not the student's) to a new run id,
     then rewrite the old paths to the new ones in every text file and symlink, so nothing points back. Returns the
@@ -477,6 +508,8 @@ def build_sandbox(cfg: Config, persona: dict, *, repo=None, from_run: str | None
     if from_run:  # the same laptop, a later sitting: the copy keeps the repo, origin, home folder and tutor settings
         copied = _copy_run(old_ws, old_root, ws, cfg.work_dir / ".home" / run_id)
         repo = ws / (cfg.repo_name or tpl.name)
+        if cfg.template_updates:
+            copied["template_update"] = _template_update(cfg, ws, repo, old_ws.name)
     (ws / "tmp").mkdir(parents=True, exist_ok=True)
     for private in (ws, cfg.work_dir / ".home" / run_id):
         private.mkdir(parents=True, exist_ok=True)
@@ -980,14 +1013,19 @@ def _stop(turn: dict, status: str, cost: dict, cfg: Config, silent_ok: bool = Fa
     return None
 
 
-def _gate(cfg: Config, repo: Path, run_dir: Path, env: dict | None = None) -> None:
+def _gate(cfg: Config, repo: Path, run_dir: Path, env: dict | None = None, run: dict | None = None) -> None:
     """Run the end-of-run check and write gate.txt; an empty gate writes nothing. With `env` (the tutor's own
-    environment: its home folder, PATH and the world's settings) the check sees the laptop as the tutor did."""
+    environment: its home folder, PATH and the world's settings) the check sees the laptop as the tutor did. The
+    check also gets PILOT_RUN_ID, PILOT_PERSONA and PILOT_RUBRIC (the run's rubric file name), so one gate can check
+    the part a run was for."""
     if not cfg.gate.strip():
         return
+    run = run or {}
+    names = {"PILOT_RUN_ID": run.get("run_id") or run_dir.name, "PILOT_PERSONA": run.get("persona") or "",
+             "PILOT_RUBRIC": run.get("rubric") or "rubric.md"}
     try:
         p = subprocess.run(cfg.gate, shell=True, cwd=repo, timeout=cfg.turn_timeout_s, stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, env={**os.environ, **env} if env else None)
+                           capture_output=True, text=True, env={**os.environ, **(env or {}), **names})
         body = f"exit {p.returncode}\n{p.stdout}{p.stderr}"
     except subprocess.TimeoutExpired as e:
         body = "exit timeout\n" + "".join(b.decode(errors="replace") if isinstance(b, bytes) else b or ""
@@ -1369,7 +1407,7 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
                 run["world"] = call(world, "facts", None)
             except Exception as e:
                 log.write(f"[run] world stop failed: {type(e).__name__}: {e}\n")
-        _gate(cfg, repo, run_dir, env=tutor_env if home or wenv else None)
+        _gate(cfg, repo, run_dir, env=tutor_env if home or wenv else None, run=run)
         for client in (tutor, student):
             try:
                 if client is not None:

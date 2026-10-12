@@ -87,3 +87,46 @@ def local_path(root: Path, address: str) -> Path | None:
     """The bare repository a GitHub URL maps to, or None when it is not a GitHub repository URL."""
     m = URL.match(address.strip())
     return Path(root) / m.group(1) / f"{m.group(2)}.git" if m else None
+
+
+def _run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
+    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       env={**os.environ, **(env or {})})
+    if p.returncode:
+        raise RuntimeError(f"git {' '.join(args[:3])}: {p.stderr.strip()}")
+    return p.stdout
+
+
+def replay_template(bare: Path, template: Path, since: str | None, ref: str = "HEAD",
+                    branch: str = "main") -> list[dict]:
+    """Make a template update reach a run: add the template's commits after `since` (up to `ref`) to `bare`'s
+    `branch`, one commit each, with the template commit's message, author and date and its whole tree, on top of
+    what `branch` holds now. A student's `git fetch upstream` then lists them by subject and `git merge
+    upstream/main` brings them in, as when the instructor pushes to the class repository. When `since` is unknown
+    to the template's history (or not given), one commit carries `ref`'s tree. Returns
+    [{"sha", "template", "subject"}] for the commits added (none when the template has not moved)."""
+    bare, template = Path(bare), Path(template)
+    head = _run("rev-parse", f"{ref}^{{commit}}", cwd=template).strip()
+    known = bool(since) and subprocess.run(["git", "merge-base", "--is-ancestor", since, head], cwd=template,
+                                           capture_output=True).returncode == 0
+    commits = [c for c in _run("rev-list", "--reverse", f"{since}..{head}", cwd=template).split()] if known else [head]
+    if not commits or (known and since == head):
+        return []
+    _run("--git-dir", str(bare), "fetch", "-q", "--no-tags", str(template), f"+{head}:refs/pilot/template")
+    parent = _run("--git-dir", str(bare), "rev-parse", f"refs/heads/{branch}").strip()
+    added = []
+    try:
+        for c in commits:
+            name, email, date, message = _run("log", "-1", "--format=%an%x00%ae%x00%aI%x00%B", c,
+                                              cwd=template).split("\0", 3)
+            who = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_AUTHOR_DATE": date,
+                   "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email, "GIT_COMMITTER_DATE": date}
+            tree = _run("--git-dir", str(bare), "rev-parse", f"{c}^{{tree}}").strip()
+            parent = _run("--git-dir", str(bare), "commit-tree", tree, "-p", parent, "-m", message.rstrip("\n"),
+                          env=who).strip()
+            added.append({"sha": parent, "template": c, "subject": message.splitlines()[0] if message else ""})
+        _run("--git-dir", str(bare), "update-ref", f"refs/heads/{branch}", parent)
+    finally:
+        subprocess.run(["git", "--git-dir", str(bare), "update-ref", "-d", "refs/pilot/template"],
+                       capture_output=True)
+    return added
