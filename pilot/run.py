@@ -5,8 +5,8 @@ other session is asked anything, so a crash loses at most the turn in progress."
 from __future__ import annotations
 
 import asyncio, contextlib, json, os, re, shlex, shutil, signal, socket, subprocess  # noqa: E401
-import hashlib, sys, time, tomllib, warnings  # noqa: E401
-from dataclasses import MISSING, asdict, dataclass, field, fields
+import fnmatch, hashlib, sys, time, tomllib, warnings  # noqa: E401
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from . import github
 
 STUDENT_TAIL_LINES = 8  # tool output lines per tool call in the tutor's reply as the student sees it (fallback view)
 STUDENT_MAX_TURNS = 12  # the SDK's max_turns per student message; reaching it ends the run as student_loop
+PERSONA_KEYS = {"rubric", "max_usd", "max_turns"}  # what a [personas."<pattern>"] table may set
 LEAK_WORDS = ("sim", "pilot", "harness", "persona")  # never allowed in a path the tutor can see
 HOST_VARS = ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT")  # never inherited
 NOOP = re.compile(r"^\s*(?:true|:|echo(?:\s+[^|&;>]*)?|sleep(?:\s+\S+)?)\s*$")  # a command that does nothing: not a reason to split a message
@@ -153,6 +154,7 @@ class Config:
     template_updates: bool = True  # --from-run: the template's commits since the earlier run reach the upstream
     settings: dict = field(default_factory=dict)  # scenario settings with their defaults (strings)
     scenarios: dict = field(default_factory=dict)  # named presets, [scenarios.<name>] tables of settings
+    personas: dict = field(default_factory=dict)  # [personas."<key pattern>"]: rubric, max_usd, max_turns for its runs
 
 
 def _coerce(key, value, default):
@@ -216,6 +218,12 @@ def load_config(assignment_dir) -> Config:
                   None)
     if missing := missing + ([script] if script and not (tpl / script).is_file() else []):
         raise ConfigError(f"template {tpl} is missing {', '.join(missing)}")
+    for pattern, table in vals["personas"].items():
+        if not isinstance(table, dict) or (bad := sorted(set(table) - PERSONA_KEYS)):
+            raise ConfigError(f"pilot.toml: [personas.\"{pattern}\"] may set only {', '.join(sorted(PERSONA_KEYS))}"
+                              + (f", not {', '.join(bad)}" if isinstance(table, dict) else ""))
+        if table.get("rubric") and not (adir / table["rubric"]).is_file():
+            raise ConfigError(f"pilot.toml: [personas.\"{pattern}\"] rubric {table['rubric']}: no such file in {adir}")
     for key in ("finish_pattern", "slot_heading", "part_heading"):
         try:
             re.compile(vals[key])
@@ -1054,6 +1062,10 @@ def run_one(cfg: Config, persona: str, *, repo: Path | None = None, turns: int |
     if "CLAUDE_CODE_OAUTH_TOKEN" in env:  # from oauth_token_file; never recorded (see SECRETS)
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = env["CLAUDE_CODE_OAUTH_TOKEN"]
     who = load_persona(cfg, persona)
+    table = next((t for pattern, t in cfg.personas.items() if fnmatch.fnmatchcase(persona, pattern)), {})
+    rubric, turns = rubric or table.get("rubric"), turns or table.get("max_turns")
+    if table.get("max_usd"):
+        cfg = replace(cfg, max_usd=float(table["max_usd"]))
     if from_run and repo:
         raise ConfigError("--from-run and --repo cannot be combined")
     if rubric and not (cfg.assignment_dir / rubric).is_file():

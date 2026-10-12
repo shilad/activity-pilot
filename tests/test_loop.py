@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import uuid
+
+import pytest
 from pathlib import Path
 
 from claude_agent_sdk import (AssistantMessage, ResultMessage, SystemMessage, TaskNotificationMessage, TaskStartedMessage,
@@ -332,3 +334,21 @@ def test_gate_knows_the_run(tmp_path):
         lambda p, st: [("say", "Use this MCP server" if "New MCP" in p else "bye\n(leaves)")], env=env, tools=tools,
         cwd=cwd))
     assert (out / "gate.txt").read_text() == f"exit 0\n{out.name} jordan rubric.md\n"
+
+
+def test_key_table_sets_rubric_budget_and_turns(tmp_path):
+    """[personas."<pattern>"] gives matching personas' runs their rubric, budget and turn cap (the command line
+    still wins)."""
+    course = _assignment(tmp_path)
+    (course / "rubric-p2.md").write_text("# Rubric\n- **S1** something\n")
+    with open(course / "pilot.toml", "a") as f:
+        f.write('\n[personas."jor*"]\nrubric = "rubric-p2.md"\nmax_usd = 42\nmax_turns = 3\n')
+    cfg = run.load_config(course)
+    out = run.run_one(cfg, "jordan", tutor=FakeTutor, student=lambda env, tools, cwd: ScriptedStudent(
+        lambda p, st: [("say", "Use this MCP server" if "New MCP" in p else "more")], env=env, tools=tools, cwd=cwd))
+    data = json.loads((out / "run.json").read_text())
+    assert data["rubric"] == "rubric-p2.md" and data["config"]["max_usd"] == 42.0 and data["ended_by"] == "max_turns"
+    with open(course / "pilot.toml", "a") as f:
+        f.write('\n[personas."x*"]\ncolour = "red"\n')
+    with pytest.raises(run.ConfigError, match="may set only"):
+        run.load_config(course)
