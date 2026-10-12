@@ -1,5 +1,6 @@
 """Offline tests for the keys added for templates like HW2: heading slots, the finish pattern, any-command gates, the
 token file and its redaction, efforts, and config checks. No network, no SDK session."""
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -215,3 +216,23 @@ def test_unsandboxed_retry_policy(tmp_path):
                      ("ls ~/../../", "outside"), ("cat $HOME/x", "expands"), ("git log `whoami`", "expands"),
                      ("rm -rf .claude", "rm"), ("tail -5 ../../other/file", "outside")):
         assert why in (ok(bad) or ""), bad
+
+
+def test_tutor_hook_runs_safe_commands_outside(tmp_path):
+    """The tutor's pre-command hook marks a command that stays in the run to run outside the sandbox (so a merge
+    can write .claude/), leaves others sandboxed, and notes it in the turn's prompts."""
+    ws = tmp_path / "ws"
+    repo = ws / "repo"
+    repo.mkdir(parents=True)
+    cfg = SimpleNamespace(sandbox_retry=run.Config.sandbox_retry, student_bash=True, turn_timeout_s=5)
+    state = {"sandbox_roots": [str(ws)], "tutor_turn": {"prompts": []}}
+    hook = run.callbacks(cfg, {"edits": []}, repo, state)[3]
+
+    def call(command):
+        return asyncio.run(hook({"tool_name": "Bash", "tool_input": {"command": command}}, "t1", None))
+    out = call("git merge upstream/main --no-edit 2>&1 | tail -3")
+    assert out["hookSpecificOutput"]["updatedInput"]["dangerouslyDisableSandbox"] is True
+    assert state["tutor_turn"]["prompts"][-1]["reason"] == "outside the sandbox: stays in this run"
+    assert call("ls /Users") == {} and call("find . -name x") == {}
+    state["sandbox_roots"] = []
+    assert call("git status") == {}

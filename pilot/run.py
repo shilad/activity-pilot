@@ -676,7 +676,25 @@ def callbacks(cfg: Config, persona: dict, repo: Path, state: dict):
         turn["asks"] += [{"question": q, "answer": a} for q, a in answers.items()]
         return PermissionResultAllow(updated_input={**inp, "answers": answers})
 
-    return tutor_tool, student_tool, student_hook
+    async def tutor_hook(data, tool_use_id, context):
+        """Before each of the tutor's shell commands: one that stays in the run and uses only sandbox_retry's
+        programs runs outside the sandbox from the start, as on a student's laptop, where there is none. (Claude
+        Code's sandbox always refuses writes to .claude/agents, .claude/skills and .claude/settings.json, so a template
+        update merged with `git merge ... | tail` would fail, and Claude does not ask to bypass that protection.)"""
+        inp = data.get("tool_input") or {}
+        roots = [Path(r).resolve() for r in state.get("sandbox_roots", [])]
+        if data.get("tool_name") != "Bash" or inp.get("dangerouslyDisableSandbox") or not roots or not cfg.sandbox_retry:
+            return {}
+        command = str(inp.get("command", ""))
+        if unsandboxed_ok(command, tuple(cfg.sandbox_retry), roots, repo) is not None:
+            return {}
+        if state.get("tutor_turn") is not None and not re.fullmatch(r"\s*git\b[^|;&]*", command):
+            state["tutor_turn"]["prompts"].append({"tool": "Bash", "summary": _summary(inp), "decision": "allow",
+                                                   "reason": "outside the sandbox: stays in this run"})
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                       "updatedInput": {**inp, "dangerouslyDisableSandbox": True}}}
+
+    return tutor_tool, student_tool, student_hook, tutor_hook
 
 
 def unsandboxed_ok(command: str, allowed: tuple, roots: list[Path], cwd: Path) -> str | None:
@@ -762,7 +780,8 @@ def options(cfg: Config, sb: dict, persona: dict, actor: str, can_use_tool, stde
                   max_budget_usd=cfg.max_usd, stderr=stderr, **({"cli_path": str(sb["cli"])} if sb.get("cli") else {}))
     if actor == "tutor":  # Claude Code itself: its real prompt, the template's settings, every prompt to the callback
         flags = {"settings": json.dumps(sb["sandbox"])} if sb.get("sandbox") else {}
-        return ClaudeAgentOptions(system_prompt={"type": "preset", "preset": "claude_code"},
+        hooks = {"hooks": {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[hook])]}} if hook else {}
+        return ClaudeAgentOptions(system_prompt={"type": "preset", "preset": "claude_code"}, **hooks,
                                   setting_sources=list(cfg.tutor_setting_sources), include_hook_events=True,
                                   model=cfg.tutor_model or None, effort=cfg.tutor_effort or None, resume=resume,
                                   env={**base, "TMPDIR": str(sb["workspace"] / "tmp"), **TUTOR_EXTRA_ENV,
@@ -1232,7 +1251,7 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
         prompt = prompt.replace(NO_APPS, note.strip()) if NO_APPS in prompt else prompt + "\n\n" + note.strip()
     if cfg.tell_date:
         prompt += "\n\n" + TODAY.format(date=f"{datetime.now():%A, %B} {datetime.now().day}, {datetime.now():%Y}")
-    tutor_tool, student_tool, student_hook = callbacks(cfg, persona, repo, state)
+    tutor_tool, student_tool, student_hook, tutor_hook = callbacks(cfg, persona, repo, state)
     warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)  # expected: the hook polices instead
     student = state["student"] = make_student(
         {**os.environ, **student_env}, {t.name: t for t in tools}, repo) if make_student else ClaudeSDKClient(options(
@@ -1242,8 +1261,9 @@ async def _drive(cfg: Config, persona: dict, sb: dict, stripped: list[str], limi
     def new_tutor(resume=None, path=None, cwd=None) -> ClaudeSDKClient:
         state["tutor_fresh"] = True  # the next tutor turn keeps its init details (servers and tools at start)
         env = {**tutor_env, **({"PATH": path} if path else {})}
-        opts = options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n"), env=env,
-                       resume=resume, cwd=cwd)
+        opts = options(cfg, sb, persona, "tutor", tutor_tool, lambda s: log.write(f"[tutor] {s}\n"),
+                       tutor_hook if sb.get("sandbox") and cfg.sandbox_retry else None, env=env, resume=resume,
+                       cwd=cwd)
         return make_tutor(opts) if make_tutor else ClaudeSDKClient(opts)
 
     def with_notices(text: str) -> str:
