@@ -245,3 +245,31 @@ def test_tutor_hook_runs_safe_commands_outside(tmp_path):
     assert call("ls /Users") == {} and call("find . -name x") == {}
     state["sandbox_roots"] = []
     assert call("git status") == {}
+
+
+def test_subagent_calls_are_marked(tmp_path):
+    """A subagent's tool calls (here a grader's Read, inside the tutor's Agent call) are recorded as the
+    subagent's, with its type and model, and transcript.md marks them; the turn's model stays the tutor's."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
+
+    class Client:
+        async def query(self, prompt):
+            return None
+
+        async def receive_response(self):
+            yield AssistantMessage(content=[ToolUseBlock(id="a1", name="Agent", input={
+                "subagent_type": "eval-grader", "prompt": "Input batch: b1"})], model="claude-opus-5-5")
+            yield AssistantMessage(content=[ToolUseBlock(id="r1", name="Read", input={"file_path": "grades/b1.jsonl"})],
+                                   model="claude-sonnet-5", parent_tool_use_id="a1")
+            yield UserMessage(content=[ToolResultBlock(tool_use_id="r1", content="12 lines")], parent_tool_use_id="a1")
+            yield UserMessage(content=[ToolResultBlock(tool_use_id="a1", content="done")])
+            yield AssistantMessage(content=[TextBlock(text="Grading finished.")], model="claude-opus-5-5")
+            yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
+                                session_id="s1", total_cost_usd=0.0, usage={}, model_usage={})
+    turn = run._new_turn(1, "tutor")
+    asyncio.run(run.ask(Client(), "grade it", turn, 30))
+    agent, read = turn["tools"]
+    assert "by" not in agent and read["by"] == {"agent": "eval-grader", "model": "claude-sonnet-5"}
+    assert turn["model"] == "claude-opus-5-5" and turn["text"] == "Grading finished."
+    text = facts.render_turn(turn)
+    assert "> Agent " in text and "> [subagent eval-grader, claude-sonnet-5] Read grades/b1.jsonl" in text

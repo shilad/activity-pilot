@@ -68,7 +68,9 @@ turn is written first, then the tutor's.
 {"exchange": 3, "actor": "student|tutor", "session_id": "uuid",
  "t_start": "iso", "t_end": "iso", "seconds": 12.3,
  "text": "the actor's final text for the turn (all text blocks joined)",
- "tools": [{"name": "Bash", "input": "JSON string of the input, cut to 2000 chars", "result": "last 800 chars", "is_error": false}],
+ "tools": [{"name": "Bash", "input": "JSON string of the input, cut to 2000 chars", "result": "last 800 chars", "is_error": false,
+            "by": {"agent": "eval-grader", "model": "claude-sonnet-5"}}],   (by: only on a subagent's call, not the actor's own;
+                                                   transcript.md marks it [subagent <type>, <model>])
  "prompts": [{"tool": "Bash", "summary": "one line: the command or the file path", "decision": "allow|deny", "reason": "..."}],
  "hooks": [{"event": "SessionStart|PreToolUse|Stop|...", "ok": true, "output": "first 200 chars"}],
  "asks": [{"question": "...", "answer": "..."}],

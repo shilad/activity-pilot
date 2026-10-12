@@ -141,7 +141,9 @@ def render_turn(turn: dict, *, for_student: bool = False) -> str:
     for tool in turn.get("tools") or []:
         arg = _arg(tool).strip().splitlines() or [""]
         more = " ..." if len(arg) > 1 or len(arg[0]) > 200 else ""
-        out.append(f"> {tool.get('name')} {arg[0][:200]}{more}" + (" (error)" if tool.get("is_error") else ""))
+        by = tool.get("by")  # a subagent's call (a grader, an answer writer), not the tutor's own
+        who = f"[subagent {by.get('agent')}, {by.get('model')}] " if isinstance(by, dict) else ""
+        out.append(f"> {who}{tool.get('name')} {arg[0][:200]}{more}" + (" (error)" if tool.get("is_error") else ""))
         out += ["    " + line for line in str(tool.get("result") or "").rstrip().splitlines()[-tail:]]
     for p in turn.get("prompts") or []:
         word = "approved" if p.get("decision") == "allow" else "denied"

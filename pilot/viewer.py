@@ -558,7 +558,9 @@ def _call(call: dict, flagged: bool) -> str:
     target = data
     if isinstance(data, dict):
         target = next((data[key] for key in TARGET_KEYS if data.get(key)), json.dumps(data))
-    line = " ".join(f"{call.get('name')} {target or ''}".split())[:200]
+    by = call.get("by")  # a subagent's call (a grader, an answer writer), not the actor's own
+    who = f"[subagent {by.get('agent')}, {by.get('model')}] " if isinstance(by, dict) else ""
+    line = who + " ".join(f"{call.get('name')} {target or ''}".split())[:200]
     output = "\n".join(str(call.get("result") or "").splitlines()[-TRANSCRIPT_TAIL_LINES:])
     return (f'<div class="call">{_tag(word, tone) if flagged else ""}<code>{_e(line)}</code>'
             + (' <span class="tone-bad">(error)</span>' if error and not flagged else "") + "</div>"

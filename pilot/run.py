@@ -816,6 +816,7 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
     t0, pending, texts, narr, status = time.monotonic(), {}, [], [], ["ok", ""]
     turn["text"] = ""
     tasks = client.__dict__.setdefault("_pilot_tasks", {})  # background tasks still running: id -> (what, type)
+    agent_types = client.__dict__.setdefault("_pilot_agents", {})  # the tutor's Agent calls: tool use id -> type
     left = client.__dict__.setdefault("_pilot_left_running", set())  # shell tasks no longer waited for (servers)
     match = finish if callable(finish) else (lambda line: bool(finish) and line.strip() == finish)
 
@@ -840,7 +841,9 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
                             "mcp_tools": {s: sum(t.startswith(f"mcp__{s}__") for t in tools)
                                           for s in {t.split("__")[1] for t in tools if t.startswith("mcp__")}}}
         elif isinstance(msg, AssistantMessage):
-            turn["model"], turn["session_id"] = msg.model or turn["model"], msg.session_id or turn["session_id"]
+            sub = msg.parent_tool_use_id  # a subagent's message (a grader, an answer writer): its calls are its own
+            if sub is None:
+                turn["model"], turn["session_id"] = msg.model or turn["model"], msg.session_id or turn["session_id"]
             for b in msg.content:
                 if isinstance(b, TextBlock) and msg.parent_tool_use_id is None:
                     texts.append(b.text)
@@ -853,6 +856,10 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
                         turn["text"] = ""
                     turn["tools"].append(pending.setdefault(b.id, {"name": b.name, "result": None, "is_error": None,
                                          "input": json.dumps(b.input, ensure_ascii=False)[:2000]}))
+                    if b.name in ("Agent", "Task"):
+                        agent_types[b.id] = str((b.input or {}).get("subagent_type") or "general-purpose")
+                    if sub is not None:
+                        pending[b.id]["by"] = {"agent": agent_types.get(sub, "subagent"), "model": msg.model}
             status[1] = f"{msg.error}: {turn['text'][-300:]}" if msg.error else status[1]
         elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
             for b in msg.content:
@@ -862,7 +869,8 @@ async def ask(client: ClaudeSDKClient, prompt: str, turn: dict, timeout: float, 
                     pending[b.tool_use_id].update(result=full[-800:], is_error=bool(b.is_error))
                     # The finish string counts only as a whole line of command output, the way the gate prints it:
                     # a Read of a README that quotes it ended an early toy run in exchange 1.
-                    lines = full.splitlines() if pending[b.tool_use_id]["name"] == "Bash" else []
+                    lines = full.splitlines() if pending[b.tool_use_id]["name"] == "Bash" and \
+                        "by" not in pending[b.tool_use_id] else []
                     turn["finish_seen"] = turn["finish_seen"] or any(map(match, lines))
         elif isinstance(msg, ResultMessage):
             turn["session_id"], turn["result"] = msg.session_id, {k: getattr(msg, k) for k in RESULT_FIELDS}
