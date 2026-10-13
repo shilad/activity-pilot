@@ -141,8 +141,8 @@ def test_load_world(tmp_path):
 
 
 def test_replay_template(tmp_path):
-    """A template update reaches a run: the template's later commits land on the upstream's main, one by one, with
-    their subjects, and the student's merge keeps their own work."""
+    """A template update reaches a run: the template's later commits (from the branch it has checked out, here not
+    main) land on the upstream's main, one by one, with their subjects, and the student's merge keeps their work."""
     tpl, student = tmp_path / "tpl", tmp_path / "student"
 
     def git(cwd, *args):
@@ -160,6 +160,7 @@ def test_replay_template(tmp_path):
     bare = github.add_repo(tmp_path / "github", "shilad", "course", student)
     (student / "WRITEUP.md").write_text("## Part 1\nmy answer\n\n## Part 2\n[TBD]\n")
     git(student, "commit", "-qam", "Part 1 done")
+    git(tpl, "checkout", "-q", "-b", "two-sft")  # the template's later work on a branch other than main
     (tpl / "WRITEUP.md").write_text("## Part 1\nXXXX\n\n## Part 2\nXXXX\n")
     (tpl / "part2.md").write_text("Part 2\n")
     git(tpl, "add", "-A")
